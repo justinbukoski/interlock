@@ -1,0 +1,96 @@
+name: foreman-memory
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foreman
+      POSTGRES_PASSWORD: ${FOREMAN_DB_PASSWORD}
+      POSTGRES_DB: foreman
+    volumes:
+      - foreman-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foreman -d foreman"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [database]
+
+  embedder:
+    build:
+      context: ./embedder
+    restart: unless-stopped
+    environment:
+      MODEL_ID: BAAI/bge-large-en-v1.5
+      HF_HOME: /models
+    volumes:
+      - foreman-models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8840/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    networks: [embedding, model-download]
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/usr/local/bin/foreman-migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FOREMAN_V6_MIGRATION_DATABASE_URL: postgresql://foreman:${FOREMAN_DB_PASSWORD}@postgres:5432/foreman
+      FOREMAN_V6_MIGRATOR_ROLE: foreman
+      FOREMAN_V6_RUNTIME_ROLE: foreman
+    networks: [database]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      embedder:
+        condition: service_healthy
+    environment:
+      FOREMAN_V6_DATABASE_URL: postgresql://foreman:${FOREMAN_DB_PASSWORD}@postgres:5432/foreman
+      FOREMAN_V6_AUTH_FILE: /run/foreman/auth.json
+      FOREMAN_V6_LISTEN: 0.0.0.0:8851
+      FOREMAN_V6_TRUSTED_PROXY: "true"
+      FOREMAN_V6_EMBEDDER_URL: http://embedder:8840
+      FOREMAN_V6_EMBEDDING_MODEL: BAAI/bge-large-en-v1.5
+      RUST_LOG: foreman_memory_v6=info
+    volumes:
+      - ./state/auth.json:/run/foreman/auth.json:ro
+    user: "${FOREMAN_UID:-1000}:${FOREMAN_GID:-1000}"
+    ports:
+      - "127.0.0.1:${FOREMAN_PORT:-8851}:8851"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/foreman-healthcheck", "--http", "127.0.0.1:8851", "/v6/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [database, embedding]
+
+volumes:
+  foreman-postgres:
+  foreman-models:
+
+networks:
+  database:
+    internal: true
+  embedding:
+    internal: true
+  model-download:

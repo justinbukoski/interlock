@@ -1,0 +1,9 @@
+/target
+/distribution/.env
+/distribution/state/
+__pycache__/
+*.pyc
+/deploy/.env
+/deploy/secrets/*.json
+/deploy/secrets/*.token
+/deploy/secrets/repo2-cipher-pass

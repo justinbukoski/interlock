@@ -1,0 +1,6 @@
+.git
+target
+deploy/.env
+deploy/secrets
+deploy/reports
+deploy/provenance
