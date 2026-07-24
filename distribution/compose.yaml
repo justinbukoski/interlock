@@ -65,6 +65,7 @@ services:
       FOREMAN_V6_LISTEN: 0.0.0.0:8851
       FOREMAN_V6_TRUSTED_PROXY: "true"
       FOREMAN_V6_EMBEDDER_URL: http://embedder:8840
+      FOREMAN_V6_EMBEDDER_ALLOWED_HOST: embedder
       FOREMAN_V6_EMBEDDING_MODEL: BAAI/bge-large-en-v1.5
       RUST_LOG: foreman_memory_v6=info
     volumes:

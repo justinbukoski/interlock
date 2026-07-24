@@ -39,6 +39,14 @@ struct EmbedResponse {
 
 impl HttpEmbedder {
     pub fn new(base_url: &str, expected_model: String) -> Result<Self, AppError> {
+        Self::new_with_allowed_host(base_url, expected_model, None)
+    }
+
+    pub fn new_with_allowed_host(
+        base_url: &str,
+        expected_model: String,
+        allowed_host: Option<&str>,
+    ) -> Result<Self, AppError> {
         let mut endpoint = reqwest::Url::parse(base_url)
             .map_err(|error| AppError::Invalid(format!("invalid embedder URL: {error}")))?;
         if !matches!(endpoint.scheme(), "http" | "https") {
@@ -63,9 +71,12 @@ impl HttpEmbedder {
                 IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
                 IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
             });
-        if !private_host {
+        let explicitly_allowed =
+            allowed_host.is_some_and(|allowed| host.eq_ignore_ascii_case(allowed));
+        if !private_host && !explicitly_allowed {
             return Err(AppError::Invalid(
-                "embedder must be a literal private/loopback address or localhost".into(),
+                "embedder must be private/loopback, localhost, or the explicitly allowed host"
+                    .into(),
             ));
         }
         endpoint.set_path("/embed");
@@ -124,5 +135,31 @@ impl EmbeddingProvider for HttpEmbedder {
             values,
             model: response.model,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HttpEmbedder;
+
+    #[test]
+    fn named_embedder_requires_exact_allowlist() {
+        assert!(HttpEmbedder::new("http://embedder:8840", "model".into()).is_err());
+        assert!(
+            HttpEmbedder::new_with_allowed_host(
+                "http://embedder:8840",
+                "model".into(),
+                Some("embedder")
+            )
+            .is_ok()
+        );
+        assert!(
+            HttpEmbedder::new_with_allowed_host(
+                "http://not-embedder:8840",
+                "model".into(),
+                Some("embedder")
+            )
+            .is_err()
+        );
     }
 }

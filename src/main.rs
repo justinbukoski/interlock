@@ -16,6 +16,7 @@ struct Config {
     listen: SocketAddr,
     trusted_proxy: bool,
     embedder_url: Option<String>,
+    embedder_allowed_host: Option<String>,
     embedding_model: String,
 }
 
@@ -29,6 +30,7 @@ impl Config {
         let trusted_proxy =
             std::env::var("FOREMAN_V6_TRUSTED_PROXY").is_ok_and(|value| value == "true");
         let embedder_url = std::env::var("FOREMAN_V6_EMBEDDER_URL").ok();
+        let embedder_allowed_host = std::env::var("FOREMAN_V6_EMBEDDER_ALLOWED_HOST").ok();
         let embedding_model = std::env::var("FOREMAN_V6_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "BAAI/bge-large-en-v1.5".into());
         if embedding_model.is_empty() || embedding_model.len() > 128 {
@@ -43,6 +45,7 @@ impl Config {
             listen,
             trusted_proxy,
             embedder_url,
+            embedder_allowed_host,
             embedding_model,
         })
     }
@@ -103,7 +106,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let mut embedding_worker = None;
     if let Some(url) = &config.embedder_url {
-        let embedder = Arc::new(HttpEmbedder::new(url, config.embedding_model.clone())?);
+        let embedder = Arc::new(HttpEmbedder::new_with_allowed_host(
+            url,
+            config.embedding_model.clone(),
+            config.embedder_allowed_host.as_deref(),
+        )?);
         let worker_model = config.embedding_model.clone();
         state = state.with_embedder(embedder.clone());
         let worker_store = store.clone();
