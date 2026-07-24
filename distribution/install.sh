@@ -48,8 +48,8 @@ python3 "$dist/generate-auth.py" \
   --writer-hash "$writer_hash" \
   --owner-hash "$owner_hash"
 
-docker compose --env-file "$env_file" -f "$dist/compose.yaml" up -d --build
-docker compose --env-file "$env_file" -f "$dist/compose.yaml" wait api
+docker compose --env-file "$env_file" -f "$dist/compose.yaml" \
+  up -d --build --wait --wait-timeout 900
 
 cargo build --locked --release --bin foreman_mcp
 install -m 0755 "$root/target/release/foreman_mcp" "$HOME/.local/bin/foreman-mcp"
