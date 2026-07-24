@@ -55,6 +55,7 @@ cargo build --locked --release --bin foreman_mcp
 install -m 0755 "$root/target/release/foreman_mcp" "$HOME/.local/bin/foreman-mcp"
 install -m 0755 "$dist/memory-gate.py" "$HOME/.local/bin/foreman-memory-gate"
 
+foreman_port=$(awk -F= '$1 == "FOREMAN_PORT" { print $2; exit }' "$env_file")
 echo
-echo "Foreman Memory is running on http://127.0.0.1:8851."
+echo "Foreman Memory is running on http://127.0.0.1:${foreman_port:-8851}."
 echo "Next: follow docs/INSTALL_WITH_COWORK.md to connect and enforce it."

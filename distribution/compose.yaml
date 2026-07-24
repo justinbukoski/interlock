@@ -83,13 +83,17 @@ services:
       - /tmp:rw,noexec,nosuid,nodev,size=64m
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    networks: [database, embedding]
+    # Docker does not publish host ports for containers attached only to
+    # internal networks. The access network exists solely to make the
+    # loopback-only port mapping effective.
+    networks: [access, database, embedding]
 
 volumes:
   foreman-postgres:
   foreman-models:
 
 networks:
+  access:
   database:
     internal: true
   embedding:
