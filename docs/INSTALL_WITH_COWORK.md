@@ -1,77 +1,90 @@
 # Install Foreman Memory with an AI coworker
 
-Foreman v6 is a self-hosted memory service for coding agents. This friend
-release is a **preview**: storage, scoped recall, BGE embeddings, observations,
-candidate review, canonical writes, corrections, history, and handoffs work.
-The unattended extractor that turns raw chat observations into reviewed fact
-candidates is not yet included. User prompts are observed automatically through
-hooks and agents are instructed to observe relevant outputs, but facts are not
-silently promoted.
+## Hardware and software
 
-## Hardware
-
-- Minimum: 4 CPU cores, 8 GB RAM, 15 GB free disk.
-- Comfortable: 8 CPU cores, 16 GB RAM, 30 GB free disk.
-- GPU: optional. CPU embedding works; an NVIDIA or Apple GPU can reduce latency,
-  but this Docker preview does not require one.
+- Minimum: 4 CPU cores, 8 GB RAM, and 15 GB free disk.
+- Comfortable: 8 CPU cores, 16 GB RAM, and 30 GB free disk.
+- GPU: optional. The supplied Docker embedder runs on CPU, including on macOS.
 - Software: Docker Desktop or Docker Engine with Compose, Git, Rust/Cargo,
   Python 3, and OpenSSL.
 
-The first start downloads the roughly 1.3 GB BGE-large model and builds the Rust
-service, so it takes longer than later starts.
+The first start downloads the approximately 1.3 GB BGE-large model and builds
+the Rust services. Later starts reuse both.
 
-## Prompt to hand to GPT Cowork or Claude Cowork
+## Install and verify
 
-Copy the following prompt into a desktop Cowork session with this repository's
-folder attached:
+```sh
+./distribution/install.sh
+curl -fsS http://127.0.0.1:8851/v6/health
+```
 
-> Install this Foreman Memory repository locally. Read README.md and
-> docs/INSTALL_WITH_COWORK.md first. Verify Docker, Compose, Rust/Cargo, Python 3,
-> and OpenSSL are installed. Run `distribution/install.sh` without weakening its
-> loopback-only networking or token permissions. Verify the `/v6/health` endpoint.
-> Then configure the client I am using:
+Rerunning the installer is supported. It preserves the installation's stable
+consumer, agent, and owner identities and retains existing token files.
+
+Before enabling the hooks, read `docs/PRIVACY_AND_DATA.md`. The per-prompt hook
+automatically records every user prompt. It does not ask for approval on each
+turn.
+
+## Prompt for GPT Cowork or Claude Cowork
+
+Give the coworker this repository folder and the following prompt:
+
+> Install Foreman Memory locally. Read README.md,
+> docs/INSTALL_WITH_COWORK.md, and docs/PRIVACY_AND_DATA.md first. Confirm the
+> user understands that every user prompt will be recorded automatically after
+> hooks are enabled. Run `distribution/install.sh` without weakening its
+> loopback-only networking or token permissions, and verify `/v6/health`.
 >
-> - For Codex/GPT Cowork, merge `integrations/codex/config.toml` into my
->   `~/.codex/config.toml`, replacing every `~` in MCP command and token paths
->   with my absolute home path. Merge the SessionStart and UserPromptSubmit hooks;
->   do not overwrite unrelated settings. Put the contents of
->   `integrations/codex/AGENTS.md` in `~/.codex/AGENTS.md`, preserving existing
->   instructions.
-> - For Claude Code, merge `integrations/claude/settings.json` into
->   `~/.claude/settings.json`, add the MCP server from
->   `integrations/claude/mcp.json` at user scope, and merge
->   `integrations/claude/CLAUDE.md` into `~/.claude/CLAUDE.md`. Replace `~` in
->   executable and token paths with my absolute home path.
-> - For Claude Cowork, install the local MCP through Claude Desktop. Explain that
->   web/mobile Cowork cannot enforce a local hook while the desktop app is closed.
+> Merge the matching files from `integrations/` into the user's existing client
+> configuration. Preserve unrelated settings and instructions. Replace `~` in
+> executable and token paths with the absolute home path where the client
+> requires it. Do not add the owner token to the normal agent configuration and
+> never print any token contents.
 >
-> Restart the client, trust the installed hooks after showing me their exact
-> commands, and prove enforcement with two tests: normal bootstrap succeeds, then
-> stopping the Foreman API causes a new prompt to be blocked. Restart the API
-> after the failure test. Never print token contents.
+> Restart the client and prove enforcement twice: first show that a normal
+> session bootstrap succeeds; then stop the Foreman API and show that a new
+> prompt is blocked. Start the API again immediately after the failure test.
+> Report every file changed and provide the backup, upgrade, and erase commands.
 
-## What “enforced” means
+## Client-specific configuration
 
-The setup uses three controls:
+### Codex
 
-1. the MCP server is marked required where the client supports it;
-2. a session-start and per-prompt hook calls health and bootstrap, returning
-   `continue: false` and a nonzero exit when memory is unavailable;
-3. persistent `AGENTS.md` or `CLAUDE.md` rules require recall and safe writes.
+Merge `integrations/codex/config.toml` into `~/.codex/config.toml`. Merge the
+SessionStart and UserPromptSubmit hooks instead of overwriting unrelated hooks.
+Merge `integrations/codex/AGENTS.md` into `~/.codex/AGENTS.md`.
 
-Project hooks only run in trusted projects. For stronger Codex enforcement,
-install the hooks at user scope. Enterprise Codex administrators can place the
-same hooks in managed `requirements.toml`, pin `[features].hooks = true`, and set
-`allow_managed_hooks_only = true`. Prompt instructions alone are not a security
-boundary, and specialized hosted tools may not traverse local hook paths.
+Codex desktop, CLI, and the IDE extension use the same MCP configuration.
+Restart Codex after editing it.
 
-Claude Desktop is required for local MCP access from Claude Cowork. Claude Code
-supports the checked-in `.claude/settings.json` and `.mcp.json` workflow
-directly.
+### Claude Code
 
-## Operations
+Merge `integrations/claude/settings.json` into
+`~/.claude/settings.json`, add the MCP server from
+`integrations/claude/mcp.json` at user scope, and merge
+`integrations/claude/CLAUDE.md` into `~/.claude/CLAUDE.md`.
 
-From the repository:
+### Claude Cowork
+
+Install the local MCP through Claude Desktop. Local enforcement and retrieval
+are unavailable while the desktop app and local Foreman service are not
+running. Hosted web/mobile sessions cannot independently enforce a local hook.
+
+## What enforcement means
+
+The setup combines:
+
+1. a required MCP server where the client supports that setting;
+2. session-start and per-prompt hooks that call health and bootstrap, returning
+   a blocking result when memory is unavailable; and
+3. persistent instructions requiring recall before requesting known facts and
+   requiring provenance for durable writes.
+
+The session-start hook injects the full bootstrap. Per-prompt hooks verify
+bootstrap and automatically record the prompt, but inject only a short digest
+to avoid repeatedly filling the context window.
+
+## Common operations
 
 ```sh
 docker compose --env-file distribution/.env -f distribution/compose.yaml ps
@@ -80,5 +93,4 @@ docker compose --env-file distribution/.env -f distribution/compose.yaml stop
 docker compose --env-file distribution/.env -f distribution/compose.yaml start
 ```
 
-Back up the `foreman-postgres` Docker volume. The token files live under
-`~/.config/foreman`; do not copy or commit them.
+Next, make a tested backup using `docs/BACKUP_RESTORE.md`.

@@ -8,7 +8,7 @@ state="$dist/state"
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/foreman"
 mkdir -p "$state" "$config_dir" "$HOME/.local/bin"
 
-for command in cargo docker openssl python3; do
+for command in cargo docker git openssl python3; do
   command -v "$command" >/dev/null || {
     echo "Missing required command: $command" >&2
     exit 1
@@ -42,50 +42,11 @@ sha256() {
 reader_hash=$(tr -d '\r\n' <"$reader_file" | sha256)
 writer_hash=$(tr -d '\r\n' <"$writer_file" | sha256)
 owner_hash=$(tr -d '\r\n' <"$owner_file" | sha256)
-tenant_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-user_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-consumer_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
-python3 - "$state/auth.json" "$reader_hash" "$writer_hash" "$owner_hash" "$tenant_id" "$user_id" "$consumer_id" <<'PY'
-import json
-import os
-import sys
-
-path, reader, writer, owner, tenant, user, consumer = sys.argv[1:]
-payload = {
-    "tokens": [
-        {
-            "token_sha256": reader,
-            "tenant_id": tenant,
-            "user_id": user,
-            "consumer_id": consumer,
-            "actor": "local-reader",
-            "role": "reader",
-        },
-        {
-            "token_sha256": writer,
-            "tenant_id": tenant,
-            "user_id": user,
-            "consumer_id": consumer,
-            "actor": "local-observer",
-            "role": "writer",
-        },
-        {
-            "token_sha256": owner,
-            "tenant_id": tenant,
-            "user_id": user,
-            "consumer_id": consumer,
-            "actor": "local-owner",
-            "role": "owner",
-        },
-    ]
-}
-temporary = path + ".tmp"
-with open(temporary, "w", encoding="utf-8") as handle:
-    json.dump(payload, handle)
-    handle.write("\n")
-os.chmod(temporary, 0o600)
-os.replace(temporary, path)
-PY
+python3 "$dist/generate-auth.py" \
+  --state-dir "$state" \
+  --reader-hash "$reader_hash" \
+  --writer-hash "$writer_hash" \
+  --owner-hash "$owner_hash"
 
 docker compose --env-file "$env_file" -f "$dist/compose.yaml" up -d --build
 docker compose --env-file "$env_file" -f "$dist/compose.yaml" wait api

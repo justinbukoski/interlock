@@ -3,7 +3,6 @@ pub mod auth;
 pub mod domain;
 pub mod embedding;
 pub mod error;
-pub mod evaluation;
 pub mod redaction;
 pub mod store;
 

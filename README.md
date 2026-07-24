@@ -1,89 +1,81 @@
 # Foreman Memory v6
 
-Foreman v6 is a self-hosted, agent-first durable memory service. It separates
-raw history, observations, candidate facts, canonical memory, and short-lived
-handoffs so an assistant can remember without treating every past sentence as
-truth.
+Foreman is a self-hosted durable memory service for AI coding agents. It records
+conversation prompts automatically, retrieves relevant context with hybrid
+semantic search, and keeps raw history, candidate facts, canonical memory, and
+short-lived handoffs in separate lanes.
 
-The repository contains an Axum/SQLx API,
-PostgreSQL schema, authenticated v6 routes, observation/candidate lifecycle,
-BGE/pgvector hybrid retrieval, a first-class Codex MCP adapter, and contract,
-integration, backup, restore, and shadow tests. It does not replace v5. See:
+This friend release includes:
 
-- `docs/ARCHITECTURE.md` for system boundaries and data authority.
-- `docs/ACCEPTANCE.md` for the gates required before any primary-workflow use.
-- `docs/IMPLEMENTATION.md` for local operation, security boundaries, and test
-  evidence.
+- an Axum/SQLx API and PostgreSQL with pgvector;
+- BGE-large-en-v1.5 embeddings;
+- a Rust MCP adapter for bootstrap, recall, history, observation, memory writes,
+  corrections, and handoffs;
+- fail-closed Codex and Claude Code hooks; and
+- a local Docker Compose installer with persistent identities and scoped tokens.
 
-## Friend preview
+It is a technical preview. Prompt capture and retrieval work now. Fully
+unattended extraction of every conversation into reviewed canonical facts is
+still under development; agents can create candidates and canonical records
+through the MCP tools.
 
-The portable package is ready for technical preview. It includes a local
-PostgreSQL/pgvector stack, BGE-large embeddings, a Rust MCP adapter, automatic
-user-prompt observation, and fail-closed Codex and Claude Code hooks.
+## Quick start
 
-The final unattended chat extractor is not yet implemented. Observations can be
-stored and candidates can be reviewed/promoted, but this release does not claim
-that every conversation is automatically distilled into facts. See
-`docs/INSTALL_WITH_COWORK.md` for hardware, installation, and enforcement.
+Requirements: Docker with Compose, Git, Rust/Cargo, Python 3, and OpenSSL.
 
-## Non-negotiable invariants
+```sh
+git clone https://github.com/justinbukoski63-star/foreman-memory.git
+cd foreman-memory
+./distribution/install.sh
+```
 
-1. Existing memory deployments remain running and unchanged during evaluation.
-2. v6 has its own PostgreSQL database and persistent volume.
-3. History, observations, candidate memories, and authoritative memory are
-   separate lanes; promotion between lanes is explicit and audited.
-4. Superseded or invalid records are filtered structurally, never by asking the
-   model to interpret correction prose.
-5. Every response has a server-enforced token budget.
-6. Global memory is opt-in. New records default to the current project/session.
-7. Codex and Lumi are clients of the same API, not separate memory systems.
+The service binds only to `127.0.0.1:8851`. Continue with
+[`docs/INSTALL_WITH_COWORK.md`](docs/INSTALL_WITH_COWORK.md) to connect Codex,
+Claude Code, or Claude Cowork and prove that the enforcement gate works.
+
+Automatic prompt capture is intentional and central to the product. Read
+[`docs/PRIVACY_AND_DATA.md`](docs/PRIVACY_AND_DATA.md) before enabling hooks so
+every user understands what is stored and how to export or erase it.
+
+## How retrieval works
+
+Agents normally retrieve memories through `foreman-mcp`, not through a remote
+shell bridge. At session start, `bootstrap` loads constraints, directives, and
+high-value context. During work, `recall` performs scoped hybrid retrieval and
+`history` searches the observation lane. The hooks also fail closed if the
+service cannot be reached.
+
+A shell MCP is optional and useful only when Foreman runs on another machine
+that the agent's normal sandbox cannot reach.
+
+## Security model
+
+- The API is loopback-only by default.
+- Token files and generated authorization state are mode `0600`.
+- Day-to-day agents receive reader and writer tokens.
+- The owner token is created for administration but is not placed in the
+  default agent configuration.
+- Canonical owner-authority writes and system directives require explicitly
+  configuring the owner token.
+
+See [`docs/OWNER_ADMINISTRATION.md`](docs/OWNER_ADMINISTRATION.md).
+
+## Operations
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Data model](docs/DATA_MODEL.md)
+- [Privacy and data controls](docs/PRIVACY_AND_DATA.md)
+- [Backup and restore](docs/BACKUP_RESTORE.md)
+- [Upgrading and uninstalling](docs/UPGRADING.md)
 
 ## Local verification
 
 ```sh
+python3 -m unittest discover -s distribution/tests
 cargo test --offline
 cargo clippy --offline --all-targets --all-features -- -D warnings
 ```
 
 The ignored PostgreSQL integration test requires a disposable PostgreSQL 15+
-database with pgvector 0.8.2+ through `TEST_DATABASE_URL`. Never point it at v5
-or another persistent database.
-
-## Portable install
-
-```sh
-./distribution/install.sh
-```
-
-Then follow `docs/INSTALL_WITH_COWORK.md`.
-
-## Agent clients
-
-`foreman_mcp` exposes `bootstrap`, `recall`, `history`, `observe`, `remember`,
-`correct`, and `handoff` over MCP stdio. It accepts only a loopback HTTP URL and
-mode-0600, same-user token files. Portable Codex and Claude templates live in
-`integrations/`.
-
-Codex desktop, CLI, and the IDE extension share this MCP configuration. Restart
-the client after registration. The adapter's initialization instructions make
-bootstrap mandatory, keep history/handoffs in their separate lanes, and require
-explicit authority and provenance for canonical writes.
-
-## v5 continuity import
-
-`foreman-import-v5` is an optional, one-shot, idempotent continuity importer. It requires
-separate mode-0600 files containing loopback PostgreSQL URLs for the exact
-`foreman_memory` source and `foreman_v6` target databases. It opens v5 in an
-explicitly read-only transaction, redacts supported secret classes, and writes
-the normalized v6 records atomically. Always exercise the complete path first:
-
-```sh
-FOREMAN_V5_DATABASE_URL_FILE=/run/secrets/v5-url \
-FOREMAN_V6_DATABASE_URL_FILE=/run/secrets/v6-url \
-foreman-import-v5
-```
-
-Dry-run is the fail-safe default. Only after reviewing the JSON report should an
-operator rerun with `FOREMAN_V5_IMPORT_APPLY=APPLY_V5_TO_V6`. The importer does
-not stop, update, or delete v5, and deterministic IDs plus source-record digest
-checks make an identical rerun a no-op while rejecting changed or partial rows.
+database with pgvector 0.8.2+ through `TEST_DATABASE_URL`. Never point it at a
+persistent database.

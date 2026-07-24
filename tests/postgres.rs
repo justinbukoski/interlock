@@ -17,7 +17,6 @@ const MIGRATION_0001: &str = include_str!("../migrations/0001_initial.sql");
 const MIGRATION_0002: &str = include_str!("../migrations/0002_observation_candidates.sql");
 const MIGRATION_0003: &str = include_str!("../migrations/0003_hybrid_retrieval.sql");
 const MIGRATION_0004: &str = include_str!("../migrations/0004_embedding_leases.sql");
-const MIGRATION_0005: &str = include_str!("../migrations/0005_legacy_import_predicates.sql");
 
 struct StaticEmbedder;
 struct FailingEmbedder;
@@ -909,10 +908,6 @@ async fn populated_v1_schema_upgrades_to_observation_candidate_lifecycle() {
         .await
         .unwrap();
     sqlx::raw_sql(MIGRATION_0004)
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    sqlx::raw_sql(MIGRATION_0005)
         .execute(&mut *connection)
         .await
         .unwrap();

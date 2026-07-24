@@ -15,7 +15,8 @@ const MAX_RESPONSE_BYTES: usize = 4_194_304;
 struct Config {
     base_url: Url,
     reader_token: String,
-    owner_token: String,
+    writer_token: String,
+    owner_token: Option<String>,
 }
 
 impl Config {
@@ -27,15 +28,26 @@ impl Config {
             "FOREMAN_V6_READER_TOKEN_FILE",
             ".config/foreman/v6-reader-token",
         )?;
-        let owner_path = configured_path(
-            "FOREMAN_V6_OWNER_TOKEN_FILE",
-            ".config/foreman/v6-owner-token",
+        let writer_path = configured_path(
+            "FOREMAN_V6_WRITER_TOKEN_FILE",
+            ".config/foreman/v6-writer-token",
         )?;
+        let owner_path = optional_configured_path("FOREMAN_V6_OWNER_TOKEN_FILE")?;
         Ok(Self {
             base_url,
             reader_token: read_secret(&reader_path)?,
-            owner_token: read_secret(&owner_path)?,
+            writer_token: read_secret(&writer_path)?,
+            owner_token: owner_path.as_deref().map(read_secret).transpose()?,
         })
+    }
+}
+
+fn optional_configured_path(key: &str) -> Result<Option<PathBuf>, String> {
+    match std::env::var(key) {
+        Ok(path) if path.trim().is_empty() => Err(format!("{key} cannot be empty")),
+        Ok(path) => Ok(Some(path.into())),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{key} must be valid Unicode")),
     }
 }
 
@@ -283,9 +295,31 @@ async fn call_tool(client: &Client, config: &Config, params: &Value) -> Result<V
                 .insert("intent".into(), json!("history"));
             ("/v6/recall", config.reader_token.as_str())
         }
-        "observe" => ("/v6/observations", config.owner_token.as_str()),
-        "remember" | "correct" => ("/v6/memories", config.owner_token.as_str()),
-        "handoff" => ("/v6/handoffs", config.owner_token.as_str()),
+        "observe" => ("/v6/observations", config.writer_token.as_str()),
+        "remember" | "correct" => {
+            let owner_required = arguments
+                .get("authority")
+                .and_then(Value::as_str)
+                .is_some_and(|authority| authority == "owner_instruction")
+                || arguments
+                    .get("predicate")
+                    .and_then(Value::as_str)
+                    .is_some_and(|predicate| {
+                        matches!(predicate, "system.constraint" | "system.directive")
+                    });
+            if owner_required {
+                (
+                    "/v6/memories",
+                    config.owner_token.as_deref().ok_or_else(|| {
+                        "owner-authority writes require a separately configured FOREMAN_V6_OWNER_TOKEN_FILE"
+                            .to_string()
+                    })?,
+                )
+            } else {
+                ("/v6/memories", config.writer_token.as_str())
+            }
+        }
+        "handoff" => ("/v6/handoffs", config.writer_token.as_str()),
         _ => return Err(format!("unknown tool: {name}")),
     };
     call_api(client, config, path, token, arguments).await
@@ -411,7 +445,7 @@ mod tests {
     fn endpoint_requires_loopback() {
         assert!(loopback_url("http://127.0.0.1:8851").is_ok());
         assert!(loopback_url("http://[::1]:8851").is_ok());
-        assert!(loopback_url("http://10.0.0.42:8851").is_err());
+        assert!(loopback_url("http://192.168.68.86:8851").is_err());
         assert!(loopback_url("https://example.com").is_err());
         assert!(loopback_url("http://127.0.0.1:8851/path").is_err());
     }

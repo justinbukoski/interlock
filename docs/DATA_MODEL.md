@@ -26,7 +26,7 @@ separate, unique, and stable across export/import. All timestamps are UTC
 | --- | --- |
 | `tenant_id` | Administrative isolation boundary |
 | `user_id` | Owner identity |
-| `consumer_id` | Codex, Lumi, or another authorized client |
+| `consumer_id` | Codex, Claude, or another authorized client |
 | `project_key` | Durable project identity |
 | `repository_key` | Normalized repository remote identity |
 | `thread_id` | Conversation/task identity |
@@ -100,8 +100,8 @@ deferred constraints verify this at commit.
 
 ### `documents`
 
-Versioned references to canonical external material such as Outline pages,
-Gitea files, and runbooks. The table stores identity, revision, checksum,
+Versioned references to canonical external material such as documentation
+pages, repository files, and runbooks. The table stores identity, revision, checksum,
 authority domain, scope, fetched time, and content chunks. A document supports
 propositions; it is not itself a proposition unless the retrieval intent is
 `procedure` or `why`.

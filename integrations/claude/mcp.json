@@ -7,8 +7,7 @@
       "env": {
         "FOREMAN_V6_URL": "http://127.0.0.1:8851",
         "FOREMAN_V6_READER_TOKEN_FILE": "/ABSOLUTE/HOME/.config/foreman/v6-reader-token",
-        "FOREMAN_V6_WRITER_TOKEN_FILE": "/ABSOLUTE/HOME/.config/foreman/v6-writer-token",
-        "FOREMAN_V6_OWNER_TOKEN_FILE": "/ABSOLUTE/HOME/.config/foreman/v6-owner-token"
+        "FOREMAN_V6_WRITER_TOKEN_FILE": "/ABSOLUTE/HOME/.config/foreman/v6-writer-token"
       }
     }
   }

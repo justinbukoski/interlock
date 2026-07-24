@@ -1,5 +1,5 @@
 -- Foreman Memory v6 owns this schema inside its dedicated database.
--- Never run this migration against the v5 database.
+-- Run this migration only against a dedicated Foreman database.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 

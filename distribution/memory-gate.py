@@ -14,12 +14,15 @@ from datetime import datetime, timezone
 
 
 def project_key(cwd: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", cwd, "remote", "get-url", "origin"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return "path:" + str(pathlib.Path(cwd).resolve())
     value = result.stdout.strip()
     if value:
         value = value.removesuffix(".git")
@@ -99,10 +102,16 @@ def main() -> int:
         return 2
 
     digest = hashlib.sha256(json.dumps(bootstrap, sort_keys=True).encode()).hexdigest()[:12]
-    context = (
-        "Foreman memory bootstrap succeeded. Treat returned constraints/directives as "
-        f"mandatory. Bootstrap digest: {digest}. Bootstrap: {json.dumps(bootstrap)}"
-    )
+    if event.get("hook_event_name") == "UserPromptSubmit":
+        context = (
+            "Foreman memory gate succeeded and this user prompt was recorded. "
+            f"Bootstrap digest: {digest}. Use foreman recall before asking for known facts."
+        )
+    else:
+        context = (
+            "Foreman memory bootstrap succeeded. Treat returned constraints/directives as "
+            f"mandatory. Bootstrap digest: {digest}. Bootstrap: {json.dumps(bootstrap)}"
+        )
     print(
         json.dumps(
             {

@@ -4,16 +4,15 @@ Status: design baseline, 2026-07-19. Quality takes precedence over schedule.
 
 ## Purpose
 
-Foreman v6 supplies compact, current, attributable context to Codex and Lumi
+Foreman v6 supplies compact, current, attributable context to coding agents
 without flooding model context or allowing stale statements to compete with
 their corrections. PostgreSQL is the durable authority. Memory-resident views
 are derived accelerators and can always be rebuilt.
 
 ## Service boundary
 
-v6 runs in parallel on a new port, new containers, and a dedicated ZFS-backed
-PostgreSQL cluster. It reads v5 only through an export/import pipeline. It never
-writes to, stops, reconfigures, or shares a database with v5.
+Each installation runs on its own port, containers, PostgreSQL database, and
+persistent volume. It does not share a database with another application.
 
 ## Four lanes
 
@@ -102,13 +101,6 @@ Codex receives a first-class MCP server with `bootstrap`, `recall`, `history`,
 and closes sessions and observes every turn. `AGENTS.md` contains only the
 fail-safe contract and tool-use policy.
 
-Lumi uses the same API and can add the richer inspection UI: source, freshness,
-scope, correction, promotion, and review queue. Neither client owns memory
-semantics.
-
-## Migration
-
-Migration is export, normalize, import, and compare. v5 remains the production
-source throughout shadow operation. v6 never assumes old priority or prose
-corrections are canonical. Ambiguous conflicts enter review. Cutover, if ever
-authorized, is a client configuration change with immediate rollback to v5.
+Other clients use the same API and may add richer inspection interfaces for
+source, freshness, scope, correction, promotion, and review queues. No client
+owns memory semantics.
