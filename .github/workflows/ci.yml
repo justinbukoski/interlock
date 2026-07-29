@@ -13,7 +13,7 @@ jobs:
     name: Distribution tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run installer unit tests
         run: python3 -m unittest discover -s distribution/tests
 
@@ -21,7 +21,7 @@ jobs:
     name: Rust tests and lints
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
