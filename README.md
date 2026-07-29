@@ -13,8 +13,14 @@ This friend release includes:
 - BGE-large-en-v1.5 embeddings;
 - a Rust MCP adapter for bootstrap, recall, history, observation, memory writes,
   corrections, and handoffs;
-- fail-closed Codex and Claude Code hooks; and
-- a local Docker Compose installer with persistent identities and scoped tokens.
+- fail-closed Codex and Claude Code hooks;
+- a local Docker Compose installer with persistent identities and scoped tokens;
+- the 6.5 continuity plane: a typed handoff lifecycle with compare-and-swap
+  supersession, so two agents can never both win a handoff and none is silently
+  lost; and
+- the 6.5 conversation archive: a separate durable database with idempotent
+  batch ingestion, normalized search, evidence retrieval, full export, and an
+  owner deletion saga.
 
 It is a technical preview. Prompt capture and retrieval work now. Fully
 unattended extraction of every conversation into reviewed canonical facts is

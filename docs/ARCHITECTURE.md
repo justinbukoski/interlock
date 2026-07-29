@@ -104,3 +104,25 @@ fail-safe contract and tool-use policy.
 Other clients use the same API and may add richer inspection interfaces for
 source, freshness, scope, correction, promotion, and review queues. No client
 owns memory semantics.
+
+## The 6.5 continuity plane
+
+Version 6.5 hardens the continuation lanes into a first-class subsystem.
+
+**Handoff lifecycle.** Handoffs are selected by a typed `context_key`, never by
+an arbitrary filesystem path. Supersession is a compare-and-swap on a
+per-context active pointer, so two agents cannot both win and no handoff is
+silently lost. The lifecycle API (`/v6.5/handoff/*`) covers write, exact get,
+acknowledge, per-item completion, close, history, and context validation.
+Handoffs still never enter recall, mining, or canonicalization.
+
+**Conversation archive.** The archive (`/v6.5/archive/*`) is the durable,
+replayable continuity source. It owns a separate database with authenticated
+idempotent batch ingestion, evidence retrieval, normalized search, full export,
+an owner-token deletion saga, and an ingestion-order mining cursor that feeds
+candidate extraction without re-reading history.
+
+**Capture spool.** Adapters append captured events to a local durable spool
+that fsyncs the record and its ordering metadata before acknowledging, so
+sudden process termination cannot lose an acknowledged event. The spool drains
+into archive ingestion idempotently.

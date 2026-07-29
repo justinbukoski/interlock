@@ -30,9 +30,12 @@ The embedder downloads its model during the first installation.
 
 ## Retention
 
-This preview retains captured data until the operator deletes it. It does not
-yet provide age-based expiry or a supported granular-delete API. Treat that as
-an explicit product limitation when deciding what environments to use it in.
+This preview retains captured data until the operator deletes it. The
+conversation archive supports full export (`/v6.5/archive/export`) and an
+owner-token deletion saga (`/v6.5/archive/delete`) for erasing archive
+content. Canonical memory lanes do not yet provide age-based expiry or a
+granular-delete API. Treat that as an explicit product limitation when
+deciding what environments to use it in.
 
 ## Export
 

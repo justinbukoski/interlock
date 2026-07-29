@@ -14,6 +14,8 @@ curl -fsS http://127.0.0.1:8851/v6/health
 
 The installer reuses existing tokens and stable identities. It rebuilds the
 containers, applies forward database migrations, and rebuilds the MCP adapter.
+Upgrading from v6.0.0 provisions the new conversation-archive database and its
+generated password automatically; existing data is unaffected.
 Do not downgrade across database migrations unless that release provides an
 explicit downgrade procedure.
 
