@@ -16,6 +16,8 @@ pub enum AppError {
     Conflict(String),
     #[error("retryable transaction conflict")]
     Retryable,
+    #[error("{0} is not configured on this deployment")]
+    Unavailable(&'static str),
     #[error("not found")]
     NotFound,
     #[error("storage failure")]
@@ -50,6 +52,7 @@ impl IntoResponse for AppError {
             ),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict", None),
             Self::Retryable => (StatusCode::SERVICE_UNAVAILABLE, "retryable", None),
+            Self::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", None),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", None),
             Self::Storage(_) | Self::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", None)

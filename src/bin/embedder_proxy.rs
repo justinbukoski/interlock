@@ -10,7 +10,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
     let listen = std::env::var("FOREMAN_PROXY_LISTEN").unwrap_or_else(|_| "0.0.0.0:8840".into());
     let target = std::env::var("FOREMAN_PROXY_TARGET")?;
-    if !["172.31.60.1:8840", "172.31.61.10:8851", "172.31.62.10:8852"].contains(&target.as_str()) {
+    if ![
+        "172.31.60.1:8840",
+        "172.31.61.10:8851",
+        "172.31.62.10:8852",
+        // Disposable validation networks. These fixed addresses are isolated
+        // from persistent Compose and remain narrower than a configurable
+        // arbitrary proxy target.
+        "172.31.65.1:8840",
+        "10.250.61.10:8851",
+        "10.250.62.10:8852",
+    ]
+    .contains(&target.as_str())
+    {
         return Err("proxy target is not allowlisted".into());
     }
     let listener = tokio::net::TcpListener::bind(listen).await?;

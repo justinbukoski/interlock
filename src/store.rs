@@ -16,8 +16,6 @@ use sqlx::{PgPool, Row};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-const LATEST_SCHEMA_MIGRATION: i64 = 4;
-
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     async fn ready(&self) -> Result<(), AppError>;
@@ -700,7 +698,7 @@ const ITEM_SELECT: &str = r#"
    AND (s.session_id IS NULL OR s.session_id=$7)
 "#;
 
-fn vector_literal(values: &[f32]) -> Result<String, AppError> {
+pub(crate) fn vector_literal(values: &[f32]) -> Result<String, AppError> {
     if values.len() != 1024 || values.iter().any(|value| !value.is_finite()) {
         return Err(AppError::Invalid(
             "query embedding must contain 1024 finite values".into(),
@@ -722,9 +720,8 @@ impl MemoryStore for PgMemoryStore {
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=$1 AND success) AND NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE NOT success)",
+                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=6 AND success) AND NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE NOT success)",
             )
-            .bind(LATEST_SCHEMA_MIGRATION)
             .fetch_one(&self.pool),
         )
         .await

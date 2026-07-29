@@ -15,6 +15,13 @@ pub struct Embedding {
 #[async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     async fn embed(&self, text: &str) -> Result<Embedding, AppError>;
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>, AppError> {
+        let mut embeddings = Vec::with_capacity(texts.len());
+        for text in texts {
+            embeddings.push(self.embed(text).await?);
+        }
+        Ok(embeddings)
+    }
 }
 
 #[derive(Clone)]
@@ -26,7 +33,7 @@ pub struct HttpEmbedder {
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
-    texts: [&'a str; 1],
+    texts: Vec<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -39,14 +46,6 @@ struct EmbedResponse {
 
 impl HttpEmbedder {
     pub fn new(base_url: &str, expected_model: String) -> Result<Self, AppError> {
-        Self::new_with_allowed_host(base_url, expected_model, None)
-    }
-
-    pub fn new_with_allowed_host(
-        base_url: &str,
-        expected_model: String,
-        allowed_host: Option<&str>,
-    ) -> Result<Self, AppError> {
         let mut endpoint = reqwest::Url::parse(base_url)
             .map_err(|error| AppError::Invalid(format!("invalid embedder URL: {error}")))?;
         if !matches!(endpoint.scheme(), "http" | "https") {
@@ -71,12 +70,9 @@ impl HttpEmbedder {
                 IpAddr::V4(ip) => ip.is_private() || ip.is_loopback(),
                 IpAddr::V6(ip) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00,
             });
-        let explicitly_allowed =
-            allowed_host.is_some_and(|allowed| host.eq_ignore_ascii_case(allowed));
-        if !private_host && !explicitly_allowed {
+        if !private_host {
             return Err(AppError::Invalid(
-                "embedder must be private/loopback, localhost, or the explicitly allowed host"
-                    .into(),
+                "embedder must be a literal private/loopback address or localhost".into(),
             ));
         }
         endpoint.set_path("/embed");
@@ -84,7 +80,7 @@ impl HttpEmbedder {
         endpoint.set_fragment(None);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| AppError::Internal(error.to_string()))?;
@@ -99,10 +95,25 @@ impl HttpEmbedder {
 #[async_trait]
 impl EmbeddingProvider for HttpEmbedder {
     async fn embed(&self, text: &str) -> Result<Embedding, AppError> {
+        self.embed_batch(&[text.to_string()])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::Internal("embedder returned no vector".into()))
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>, AppError> {
+        if texts.is_empty() || texts.len() > 64 {
+            return Err(AppError::Invalid(
+                "embedding batch must contain 1..64 texts".into(),
+            ));
+        }
         let response = self
             .client
             .post(self.endpoint.clone())
-            .json(&EmbedRequest { texts: [text] })
+            .json(&EmbedRequest {
+                texts: texts.iter().map(String::as_str).collect(),
+            })
             .send()
             .await
             .map_err(|_| AppError::Internal("embedder unavailable".into()))?
@@ -111,55 +122,28 @@ impl EmbeddingProvider for HttpEmbedder {
             .json::<EmbedResponse>()
             .await
             .map_err(|error| AppError::Internal(format!("invalid embedder response: {error}")))?;
-        if response.count != 1
+        if response.count != texts.len()
             || response.dims != EMBEDDING_DIMS
-            || response.embeddings.len() != 1
+            || response.embeddings.len() != texts.len()
             || response.model != self.expected_model
         {
             return Err(AppError::Internal("embedder contract mismatch".into()));
         }
-        let values = response
-            .embeddings
-            .into_iter()
-            .next()
-            .expect("length checked");
-        if values.len() != EMBEDDING_DIMS
-            || values.iter().any(|v| !v.is_finite())
-            || values.iter().all(|v| *v == 0.0)
-        {
-            return Err(AppError::Internal(
-                "embedder returned an invalid vector".into(),
-            ));
+        let mut embeddings = Vec::with_capacity(texts.len());
+        for values in response.embeddings {
+            if values.len() != EMBEDDING_DIMS
+                || values.iter().any(|v| !v.is_finite())
+                || values.iter().all(|v| *v == 0.0)
+            {
+                return Err(AppError::Internal(
+                    "embedder returned an invalid vector".into(),
+                ));
+            }
+            embeddings.push(Embedding {
+                values,
+                model: response.model.clone(),
+            });
         }
-        Ok(Embedding {
-            values,
-            model: response.model,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::HttpEmbedder;
-
-    #[test]
-    fn named_embedder_requires_exact_allowlist() {
-        assert!(HttpEmbedder::new("http://embedder:8840", "model".into()).is_err());
-        assert!(
-            HttpEmbedder::new_with_allowed_host(
-                "http://embedder:8840",
-                "model".into(),
-                Some("embedder")
-            )
-            .is_ok()
-        );
-        assert!(
-            HttpEmbedder::new_with_allowed_host(
-                "http://not-embedder:8840",
-                "model".into(),
-                Some("embedder")
-            )
-            .is_err()
-        );
+        Ok(embeddings)
     }
 }

@@ -1,4 +1,7 @@
-use foreman_memory_v6::{AppState, AuthConfig, HttpEmbedder, PgMemoryStore, TokenGrant, router};
+use foreman_memory_v6::{
+    AppState, AuthConfig, HttpEmbedder, PgArchiveStore, PgContinuityStore, PgMemoryStore,
+    TokenGrant, router,
+};
 use serde::Deserialize;
 use sqlx::postgres::PgPoolOptions;
 use std::{fs::OpenOptions, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -12,17 +15,18 @@ struct AuthFile {
 
 struct Config {
     database_url: String,
+    archive_database_url: Option<String>,
     auth_file: PathBuf,
     listen: SocketAddr,
     trusted_proxy: bool,
     embedder_url: Option<String>,
-    embedder_allowed_host: Option<String>,
     embedding_model: String,
 }
 
 impl Config {
     fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let database_url = std::env::var("FOREMAN_V6_DATABASE_URL")?;
+        let archive_database_url = std::env::var("FOREMAN_V6_ARCHIVE_DATABASE_URL").ok();
         let auth_file = PathBuf::from(std::env::var("FOREMAN_V6_AUTH_FILE")?);
         let listen: SocketAddr = std::env::var("FOREMAN_V6_LISTEN")
             .unwrap_or_else(|_| "127.0.0.1:8851".into())
@@ -30,7 +34,6 @@ impl Config {
         let trusted_proxy =
             std::env::var("FOREMAN_V6_TRUSTED_PROXY").is_ok_and(|value| value == "true");
         let embedder_url = std::env::var("FOREMAN_V6_EMBEDDER_URL").ok();
-        let embedder_allowed_host = std::env::var("FOREMAN_V6_EMBEDDER_ALLOWED_HOST").ok();
         let embedding_model = std::env::var("FOREMAN_V6_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "BAAI/bge-large-en-v1.5".into());
         if embedding_model.is_empty() || embedding_model.len() > 128 {
@@ -41,11 +44,11 @@ impl Config {
         }
         Ok(Self {
             database_url,
+            archive_database_url,
             auth_file,
             listen,
             trusted_proxy,
             embedder_url,
-            embedder_allowed_host,
             embedding_model,
         })
     }
@@ -101,19 +104,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .connect(&config.database_url)
         .await?;
-    let store = PgMemoryStore::new(pool);
+    let store = PgMemoryStore::new(pool.clone());
     let mut state = AppState::new(Arc::new(store.clone()), auth)?;
+    // Continuity handoffs live in a dedicated schema of the canonical database,
+    // so they share its pool and are always available beside v6.
+    state = state.with_continuity(Arc::new(PgContinuityStore::new(pool.clone())));
+    // The conversation archive is a SEPARATE database with its own credentials,
+    // volume, and backup policy. It is attached only when configured.
+    let mut archive_store = None;
+    if let Some(archive_url) = &config.archive_database_url {
+        let archive_pool = PgPoolOptions::new()
+            .max_connections(10)
+            .acquire_timeout(Duration::from_secs(5))
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    for statement in [
+                        "SET statement_timeout='10s'",
+                        "SET lock_timeout='2s'",
+                        "SET idle_in_transaction_session_timeout='10s'",
+                    ] {
+                        sqlx::query(statement).execute(&mut *connection).await?;
+                    }
+                    Ok(())
+                })
+            })
+            .connect(archive_url)
+            .await?;
+        let attached = PgArchiveStore::new(archive_pool);
+        state = state.with_archive(Arc::new(attached.clone()));
+        archive_store = Some(attached);
+        tracing::info!("conversation archive database attached");
+    }
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let mut embedding_worker = None;
     if let Some(url) = &config.embedder_url {
-        let embedder = Arc::new(HttpEmbedder::new_with_allowed_host(
-            url,
-            config.embedding_model.clone(),
-            config.embedder_allowed_host.as_deref(),
-        )?);
+        let embedder = Arc::new(HttpEmbedder::new(url, config.embedding_model.clone())?);
         let worker_model = config.embedding_model.clone();
         state = state.with_embedder(embedder.clone());
         let worker_store = store.clone();
+        let worker_archive = archive_store.clone();
         let worker_id = uuid::Uuid::new_v4();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let handle = tokio::spawn(async move {
@@ -128,6 +157,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(count) if count > 0 => tracing::info!(count, "embedded pending memory rows"),
                             Ok(_) => {}
                             Err(error) => tracing::warn!(%error, "embedding worker will retry"),
+                        }
+                        if let Some(archive) = &worker_archive {
+                            match archive.embed_pending(
+                                embedder.as_ref(),
+                                &worker_model,
+                                "chat-bge-large-en-v1.5-v1",
+                                64,
+                                worker_id,
+                            ).await {
+                                Ok(count) if count > 0 => tracing::info!(count, "embedded pending archive events"),
+                                Ok(_) => {}
+                                Err(error) => tracing::warn!(%error, "archive embedding worker will retry"),
+                            }
                         }
                     }
                 }
@@ -154,6 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = handle.await;
         }
         store.release_embedding_leases(worker_id).await?;
+        if let Some(archive) = &archive_store {
+            archive.release_embedding_leases(worker_id).await?;
+        }
     }
     server_result?;
     Ok(())

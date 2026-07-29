@@ -1,6 +1,6 @@
 [package]
 name = "foreman-memory-v6"
-version = "6.0.0"
+version = "6.5.0"
 edition = "2024"
 license = "MIT"
 
@@ -25,3 +25,6 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }

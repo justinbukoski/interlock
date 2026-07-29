@@ -1,5 +1,13 @@
 use crate::{
+    archive::{
+        ArchiveExportRequest, ArchiveIngestRequest, ArchiveSearchRequest, ArchiveStore,
+        DeletionRequest,
+    },
     auth::{AuthConfig, Identity, require_auth},
+    continuity::{
+        AckRequest, CloseRequest, CompleteItemsRequest, ContextRef, ContinuityStore,
+        HandoffWriteInput,
+    },
     domain::{
         BootstrapRequest, BootstrapResponse, CandidatePromotionRequest, CandidateWriteRequest,
         HandoffWriteRequest, MemoryWriteRequest, ObservationWriteRequest, RecallIntent,
@@ -16,9 +24,10 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, sync::Arc};
 use tiktoken_rs::CoreBPE;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,6 +35,8 @@ pub struct AppState {
     pub auth: AuthConfig,
     tokenizer: Arc<CoreBPE>,
     embedder: Option<Arc<dyn EmbeddingProvider>>,
+    archive: Option<Arc<dyn ArchiveStore>>,
+    continuity: Option<Arc<dyn ContinuityStore>>,
 }
 
 impl AppState {
@@ -37,12 +48,36 @@ impl AppState {
             auth,
             tokenizer: Arc::new(tokenizer),
             embedder: None,
+            archive: None,
+            continuity: None,
         })
     }
 
     pub fn with_embedder(mut self, embedder: Arc<dyn EmbeddingProvider>) -> Self {
         self.embedder = Some(embedder);
         self
+    }
+
+    pub fn with_archive(mut self, archive: Arc<dyn ArchiveStore>) -> Self {
+        self.archive = Some(archive);
+        self
+    }
+
+    pub fn with_continuity(mut self, continuity: Arc<dyn ContinuityStore>) -> Self {
+        self.continuity = Some(continuity);
+        self
+    }
+
+    fn archive(&self) -> Result<&Arc<dyn ArchiveStore>, AppError> {
+        self.archive
+            .as_ref()
+            .ok_or(AppError::Unavailable("conversation archive"))
+    }
+
+    fn continuity(&self) -> Result<&Arc<dyn ContinuityStore>, AppError> {
+        self.continuity
+            .as_ref()
+            .ok_or(AppError::Unavailable("continuity handoffs"))
     }
 }
 
@@ -55,7 +90,32 @@ pub fn router(state: AppState) -> Router {
         .route("/v6/candidates", post(create_candidate))
         .route("/v6/candidates/promote", post(promote_candidate))
         .route("/v6/handoffs", post(write_handoff))
+        // 6.5 continuity handoff repair (exact-context, compare-and-swap).
+        .route("/v6.5/handoff/get_exact", post(handoff_get_exact))
+        .route("/v6.5/handoff/write", post(handoff_write_65))
+        .route("/v6.5/handoff/acknowledge", post(handoff_acknowledge))
+        .route("/v6.5/handoff/complete_items", post(handoff_complete_items))
+        .route("/v6.5/handoff/close", post(handoff_close))
+        .route("/v6.5/handoff/history", post(handoff_history))
+        .route("/v6.5/handoff/validate_context", post(handoff_validate))
+        // 6.5 archive retrieval/lifecycle (search, evidence, export, delete).
+        .route("/v6.5/archive/search", post(archive_search))
+        .route("/v6.5/archive/health", post(archive_health))
+        .route("/v6.5/archive/evidence", post(archive_evidence))
+        .route("/v6.5/archive/export", post(archive_export))
+        .route("/v6.5/archive/delete", post(archive_delete_create))
+        .route("/v6.5/archive/delete/run", post(archive_delete_run))
+        .route("/v6.5/mining/pending", post(mining_pending))
+        .route("/v6.5/mining/advance", post(mining_advance))
         .layer(DefaultBodyLimit::max(128 * 1024))
+        .route_layer(middleware::from_fn_with_state(
+            state.auth.clone(),
+            require_auth,
+        ));
+    // Archive ingestion accepts larger batches, so it gets its own body limit.
+    let archive_ingest = Router::new()
+        .route("/v6.5/archive/events", post(archive_ingest))
+        .layer(DefaultBodyLimit::max(32 * 1024 * 1024))
         .route_layer(middleware::from_fn_with_state(
             state.auth.clone(),
             require_auth,
@@ -63,7 +123,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v6/health", get(readiness))
         .route("/v6/health/live", get(liveness))
+        .route("/v6.5/health", get(readiness_65))
         .merge(protected)
+        .merge(archive_ingest)
         .with_state(state)
 }
 
@@ -439,4 +501,274 @@ async fn write_handoff(
         }
     }
     Ok(Json(state.store.write_handoff(&identity, &request).await?))
+}
+
+// ---------------------------------------------------------------------------
+// Foreman 6.5 combined health, archive, and continuity handoff endpoints.
+// ---------------------------------------------------------------------------
+
+async fn readiness_65(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
+    // The canonical database must be ready; archive and continuity readiness are
+    // reported so a missing or unmigrated plane is visible rather than hidden.
+    state.store.ready().await?;
+    let continuity_ready = match state.continuity() {
+        Ok(store) => store.ready().await.is_ok(),
+        Err(_) => false,
+    };
+    let (archive_ready, archive_configured) = match state.archive() {
+        Ok(store) => (store.ready().await.is_ok(), true),
+        Err(_) => (false, false),
+    };
+    let status = if archive_configured && !archive_ready {
+        "degraded"
+    } else {
+        "ok"
+    };
+    Ok(Json(serde_json::json!({
+        "status": status,
+        "canonical": true,
+        "continuity": continuity_ready,
+        "archive_configured": archive_configured,
+        "archive": archive_ready,
+        "version": env!("CARGO_PKG_VERSION"),
+    })))
+}
+
+async fn archive_ingest(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<ArchiveIngestRequest>,
+) -> Result<Json<crate::archive::ArchiveIngestResponse>, AppError> {
+    Ok(Json(
+        state.archive()?.ingest_batch(&identity, &request).await?,
+    ))
+}
+
+async fn archive_search(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<ArchiveSearchRequest>,
+) -> Result<Json<Vec<crate::archive::ArchiveEventSummary>>, AppError> {
+    let query_embedding =
+        if let (Some(embedder), Some(query)) = (&state.embedder, request.query.as_deref()) {
+            let query = query.trim();
+            if query.is_empty() {
+                None
+            } else {
+                embedder.embed(query).await.ok()
+            }
+        } else {
+            None
+        };
+    Ok(Json(
+        state
+            .archive()?
+            .search(&identity, &request, query_embedding.as_ref())
+            .await?,
+    ))
+}
+
+async fn archive_health(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+) -> Result<Json<crate::archive::ArchiveHealth>, AppError> {
+    Ok(Json(state.archive()?.health(&identity).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceRequest {
+    event_ids: Vec<Uuid>,
+}
+
+async fn archive_evidence(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<EvidenceRequest>,
+) -> Result<Json<Vec<crate::archive::ArchiveEvent>>, AppError> {
+    Ok(Json(
+        state
+            .archive()?
+            .evidence(&identity, &request.event_ids)
+            .await?,
+    ))
+}
+
+async fn archive_export(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<ArchiveExportRequest>,
+) -> Result<Json<crate::archive::ArchiveExportResponse>, AppError> {
+    Ok(Json(state.archive()?.export(&identity, &request).await?))
+}
+
+async fn archive_delete_create(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<DeletionRequest>,
+) -> Result<Json<crate::archive::DeletionIntent>, AppError> {
+    Ok(Json(
+        state
+            .archive()?
+            .create_deletion(&identity, &request)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeletionRunRequest {
+    intent_id: Uuid,
+}
+
+async fn archive_delete_run(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<DeletionRunRequest>,
+) -> Result<Json<crate::archive::DeletionIntent>, AppError> {
+    Ok(Json(
+        state
+            .archive()?
+            .run_deletion(&identity, request.intent_id)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MiningPendingRequest {
+    generation_id: String,
+    #[serde(default = "default_mining_limit")]
+    limit: usize,
+}
+
+fn default_mining_limit() -> usize {
+    100
+}
+
+async fn mining_pending(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<MiningPendingRequest>,
+) -> Result<Json<Vec<crate::archive::ArchiveEvent>>, AppError> {
+    Ok(Json(
+        state
+            .archive()?
+            .mining_pending(&identity, &request.generation_id, request.limit)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MiningAdvanceRequest {
+    generation_id: String,
+    through_ingestion_seq: i64,
+}
+
+async fn mining_advance(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<MiningAdvanceRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    state
+        .archive()?
+        .advance_cursor(
+            &identity,
+            &request.generation_id,
+            request.through_ingestion_seq,
+        )
+        .await?;
+    Ok(Json(serde_json::json!({"status": "advanced"})))
+}
+
+async fn handoff_get_exact(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(context): Json<ContextRef>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let handoff = state.continuity()?.get_exact(&identity, &context).await?;
+    // Report explicit availability so a projectless task that resolved no safe
+    // identity is never handed an unrelated project's continuation.
+    Ok(Json(serde_json::json!({
+        "handoff_identity": if handoff.is_some() { "available" } else { "unavailable" },
+        "handoff": handoff,
+    })))
+}
+
+async fn handoff_write_65(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<HandoffWriteInput>,
+) -> Result<Json<crate::continuity::Handoff65>, AppError> {
+    Ok(Json(state.continuity()?.write(&identity, &request).await?))
+}
+
+async fn handoff_acknowledge(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<AckRequest>,
+) -> Result<Json<crate::continuity::AckResult>, AppError> {
+    Ok(Json(
+        state.continuity()?.acknowledge(&identity, &request).await?,
+    ))
+}
+
+async fn handoff_complete_items(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<CompleteItemsRequest>,
+) -> Result<Json<crate::continuity::Handoff65>, AppError> {
+    Ok(Json(
+        state
+            .continuity()?
+            .complete_items(&identity, &request)
+            .await?,
+    ))
+}
+
+async fn handoff_close(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<CloseRequest>,
+) -> Result<Json<crate::continuity::CloseResult>, AppError> {
+    Ok(Json(state.continuity()?.close(&identity, &request).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffHistoryRequest {
+    context: ContextRef,
+    #[serde(default = "default_history_limit")]
+    limit: usize,
+}
+
+fn default_history_limit() -> usize {
+    50
+}
+
+async fn handoff_history(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(request): Json<HandoffHistoryRequest>,
+) -> Result<Json<Vec<crate::continuity::HandoffSummary>>, AppError> {
+    Ok(Json(
+        state
+            .continuity()?
+            .history(&identity, &request.context, request.limit)
+            .await?,
+    ))
+}
+
+async fn handoff_validate(
+    State(state): State<AppState>,
+    Extension(identity): Extension<Identity>,
+    Json(context): Json<ContextRef>,
+) -> Result<Json<crate::continuity::ContextValidation>, AppError> {
+    Ok(Json(
+        state
+            .continuity()?
+            .validate_context(&identity, &context)
+            .await?,
+    ))
 }

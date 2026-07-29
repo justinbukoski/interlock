@@ -15,8 +15,7 @@ const MAX_RESPONSE_BYTES: usize = 4_194_304;
 struct Config {
     base_url: Url,
     reader_token: String,
-    writer_token: String,
-    owner_token: Option<String>,
+    owner_token: String,
 }
 
 impl Config {
@@ -28,26 +27,15 @@ impl Config {
             "FOREMAN_V6_READER_TOKEN_FILE",
             ".config/foreman/v6-reader-token",
         )?;
-        let writer_path = configured_path(
-            "FOREMAN_V6_WRITER_TOKEN_FILE",
-            ".config/foreman/v6-writer-token",
+        let owner_path = configured_path(
+            "FOREMAN_V6_OWNER_TOKEN_FILE",
+            ".config/foreman/v6-owner-token",
         )?;
-        let owner_path = optional_configured_path("FOREMAN_V6_OWNER_TOKEN_FILE")?;
         Ok(Self {
             base_url,
             reader_token: read_secret(&reader_path)?,
-            writer_token: read_secret(&writer_path)?,
-            owner_token: owner_path.as_deref().map(read_secret).transpose()?,
+            owner_token: read_secret(&owner_path)?,
         })
-    }
-}
-
-fn optional_configured_path(key: &str) -> Result<Option<PathBuf>, String> {
-    match std::env::var(key) {
-        Ok(path) if path.trim().is_empty() => Err(format!("{key} cannot be empty")),
-        Ok(path) => Ok(Some(path.into())),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{key} must be valid Unicode")),
     }
 }
 
@@ -194,7 +182,100 @@ fn tools() -> Vec<Value> {
             "inputSchema": {"type":"object","additionalProperties":false,"properties":{"request_id":{"type":"string","format":"uuid"},"project_key":{"type":"string","minLength":1,"maxLength":512},"content":{"type":"string"},"session_id":{"type":"string","minLength":1,"maxLength":512},"expires_at":{"type":["string","null"],"format":"date-time"}},"required":["request_id","project_key","content","session_id"]},
             "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         }),
+        json!({
+            "name": "evidence",
+            "description": "Retrieve the exact archived conversation events (by event ID) that support a candidate or proposition. Labeled raw history, never canonical truth.",
+            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"event_ids":{"type":"array","items":{"type":"string","format":"uuid"},"minItems":1,"maxItems":1000}},"required":["event_ids"]},
+            "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "archive_search",
+            "description": "Search the normalized conversation archive (raw history) with application/project/thread filters. Never promoted into canonical memory.",
+            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"query":{"type":["string","null"],"maxLength":4096},"consumer_id":{"type":["string","null"],"format":"uuid"},"project_key":{"type":["string","null"]},"thread_id":{"type":["string","null"]},"session_id":{"type":["string","null"]},"from":{"type":["string","null"],"format":"date-time"},"to":{"type":["string","null"],"format":"date-time"},"limit":{"type":"integer","minimum":1,"maximum":1000,"default":50}}},
+            "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "handoff_get_exact",
+            "description": "Retrieve the single active, unexpired handoff for an exact typed context. Never broadens the search; returns handoff_identity:unavailable when no safe identity resolves.",
+            "inputSchema": context_ref_schema(),
+            "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "handoff_validate_context",
+            "description": "Report whether a typed handoff context key is safe and whether it has an active handoff. Forbidden broad keys (home dir, roots) are rejected.",
+            "inputSchema": context_ref_schema(),
+            "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "handoff_history",
+            "description": "List the handoff history for an exact typed context, including superseded and completed handoffs.",
+            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"context":context_ref_schema(),"limit":{"type":"integer","minimum":1,"maximum":200,"default":50}},"required":["context"]},
+            "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "handoff_write",
+            "description": "Write a structured continuation packet for an exact typed context. Supersession is a compare-and-swap; pass expected_active_id to detect concurrent writers.",
+            "inputSchema": handoff_write_schema(),
+            "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "handoff_acknowledge",
+            "description": "Idempotently record that this consumer received a handoff after injecting it. Does not make it canonical or delete it.",
+            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"handoff_id":{"type":"string","format":"uuid"},"session_id":{"type":"string","minLength":1,"maxLength":256}},"required":["handoff_id","session_id"]},
+            "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "handoff_complete_items",
+            "description": "Mark individual continuation items completed by stable item ID without rewriting unrelated content.",
+            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"handoff_id":{"type":"string","format":"uuid"},"item_ids":{"type":"array","items":{"type":"string","format":"uuid"},"minItems":1,"maxItems":600}},"required":["handoff_id","item_ids"]},
+            "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+        }),
+        json!({
+            "name": "handoff_close",
+            "description": "Close the active handoff for an exact context when work is cleanly complete, leaving no misleading active continuation. Compare-and-swap on the active handoff.",
+            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"context":context_ref_schema(),"expected_active_id":{"type":"string","format":"uuid"}},"required":["context","expected_active_id"]},
+            "annotations": {"readOnlyHint":false,"destructiveHint":true,"idempotentHint":true,"openWorldHint":false}
+        }),
     ]
+}
+
+fn context_ref_schema() -> Value {
+    json!({
+        "type":"object",
+        "additionalProperties":false,
+        "properties":{
+            "kind":{"type":"string","enum":["repository_worktree","durable_project","thread","installation_projectless"]},
+            "key":{"type":"string","minLength":1,"maxLength":1024},
+            "family_id":{"type":["string","null"],"maxLength":256}
+        },
+        "required":["kind","key"]
+    })
+}
+
+fn handoff_write_schema() -> Value {
+    json!({
+        "type":"object",
+        "additionalProperties":false,
+        "properties":{
+            "request_id":{"type":"string","format":"uuid"},
+            "context":context_ref_schema(),
+            "session_id":{"type":"string","minLength":1,"maxLength":256},
+            "thread_id":{"type":["string","null"],"maxLength":512},
+            "summary":{"type":"string","minLength":1,"maxLength":16384},
+            "written_by":{"type":"string","minLength":1,"maxLength":256},
+            "completed":{"type":"array","items":{"type":"string"}},
+            "in_progress":{"type":"array","items":{"type":"string"}},
+            "next_actions":{"type":"array","items":{"type":"string"}},
+            "blockers":{"type":"array","items":{"type":"string"}},
+            "artifacts":{"type":"array","items":{"type":"string"}},
+            "verification_state":{"type":["string","null"]},
+            "do_not_repeat":{"type":"array","items":{"type":"string"}},
+            "expected_active_id":{"type":["string","null"],"format":"uuid"},
+            "source_snapshot_revision":{"type":["integer","null"]},
+            "expires_at":{"type":["string","null"],"format":"date-time"}
+        },
+        "required":["request_id","context","session_id","summary","written_by"]
+    })
 }
 
 fn canonical_write_schema(scope: Value) -> Value {
@@ -295,31 +376,21 @@ async fn call_tool(client: &Client, config: &Config, params: &Value) -> Result<V
                 .insert("intent".into(), json!("history"));
             ("/v6/recall", config.reader_token.as_str())
         }
-        "observe" => ("/v6/observations", config.writer_token.as_str()),
-        "remember" | "correct" => {
-            let owner_required = arguments
-                .get("authority")
-                .and_then(Value::as_str)
-                .is_some_and(|authority| authority == "owner_instruction")
-                || arguments
-                    .get("predicate")
-                    .and_then(Value::as_str)
-                    .is_some_and(|predicate| {
-                        matches!(predicate, "system.constraint" | "system.directive")
-                    });
-            if owner_required {
-                (
-                    "/v6/memories",
-                    config.owner_token.as_deref().ok_or_else(|| {
-                        "owner-authority writes require a separately configured FOREMAN_V6_OWNER_TOKEN_FILE"
-                            .to_string()
-                    })?,
-                )
-            } else {
-                ("/v6/memories", config.writer_token.as_str())
-            }
-        }
-        "handoff" => ("/v6/handoffs", config.writer_token.as_str()),
+        "observe" => ("/v6/observations", config.owner_token.as_str()),
+        "remember" | "correct" => ("/v6/memories", config.owner_token.as_str()),
+        "handoff" => ("/v6/handoffs", config.owner_token.as_str()),
+        "evidence" => ("/v6.5/archive/evidence", config.reader_token.as_str()),
+        "archive_search" => ("/v6.5/archive/search", config.reader_token.as_str()),
+        "handoff_get_exact" => ("/v6.5/handoff/get_exact", config.reader_token.as_str()),
+        "handoff_validate_context" => (
+            "/v6.5/handoff/validate_context",
+            config.reader_token.as_str(),
+        ),
+        "handoff_history" => ("/v6.5/handoff/history", config.reader_token.as_str()),
+        "handoff_write" => ("/v6.5/handoff/write", config.owner_token.as_str()),
+        "handoff_acknowledge" => ("/v6.5/handoff/acknowledge", config.owner_token.as_str()),
+        "handoff_complete_items" => ("/v6.5/handoff/complete_items", config.owner_token.as_str()),
+        "handoff_close" => ("/v6.5/handoff/close", config.owner_token.as_str()),
         _ => return Err(format!("unknown tool: {name}")),
     };
     call_api(client, config, path, token, arguments).await
@@ -466,7 +537,16 @@ mod tests {
                 "observe",
                 "remember",
                 "correct",
-                "handoff"
+                "handoff",
+                "evidence",
+                "archive_search",
+                "handoff_get_exact",
+                "handoff_validate_context",
+                "handoff_history",
+                "handoff_write",
+                "handoff_acknowledge",
+                "handoff_complete_items",
+                "handoff_close"
             ]
         );
     }

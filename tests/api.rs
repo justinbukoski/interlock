@@ -5,7 +5,17 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use foreman_memory_v6::{
-    AppState, AuthConfig, Identity, MemoryStore, TokenGrant, TokenRole,
+    AppState, ArchiveStore, AuthConfig, ContinuityStore, Identity, MemoryStore, TokenGrant,
+    TokenRole,
+    archive::{
+        ArchiveEvent, ArchiveEventSummary, ArchiveExportRequest, ArchiveExportResponse,
+        ArchiveHealth, ArchiveIngestRequest, ArchiveIngestResponse, ArchiveSearchRequest,
+        DeletionIntent, DeletionMode, DeletionRequest,
+    },
+    continuity::{
+        AckRequest, AckResult, CloseRequest, CloseResult, CompleteItemsRequest, ContextKind,
+        ContextRef, ContextValidation, Handoff65, HandoffSummary, HandoffWriteInput,
+    },
     domain::{
         Authority, BootstrapResponse, Candidate, CandidatePromotionRequest, CandidateWriteRequest,
         EpistemicStatus, Handoff, HandoffWriteRequest, MemoryItem, MemoryKind, MemoryWriteRequest,
@@ -365,4 +375,305 @@ async fn protected_routes_reject_oversized_bodies_before_deserialization() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+// ---------------------------------------------------------------------------
+// Foreman 6.5 archive + continuity route wiring (fake stores, no database).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct FakeArchive;
+
+#[async_trait]
+impl ArchiveStore for FakeArchive {
+    async fn ready(&self) -> Result<(), AppError> {
+        Ok(())
+    }
+    async fn ingest_batch(
+        &self,
+        _: &Identity,
+        request: &ArchiveIngestRequest,
+    ) -> Result<ArchiveIngestResponse, AppError> {
+        Ok(ArchiveIngestResponse {
+            acks: Vec::new(),
+            accepted: request.events.len(),
+            already_present: 0,
+            rejected: 0,
+        })
+    }
+    async fn search(
+        &self,
+        _: &Identity,
+        _: &ArchiveSearchRequest,
+        _: Option<&foreman_memory_v6::embedding::Embedding>,
+    ) -> Result<Vec<ArchiveEventSummary>, AppError> {
+        Ok(Vec::new())
+    }
+    async fn evidence(&self, _: &Identity, _: &[Uuid]) -> Result<Vec<ArchiveEvent>, AppError> {
+        Ok(Vec::new())
+    }
+    async fn export(
+        &self,
+        _: &Identity,
+        _: &ArchiveExportRequest,
+    ) -> Result<ArchiveExportResponse, AppError> {
+        Ok(ArchiveExportResponse {
+            events: Vec::new(),
+            next_after_ingestion_seq: None,
+        })
+    }
+    async fn create_deletion(
+        &self,
+        _: &Identity,
+        request: &DeletionRequest,
+    ) -> Result<DeletionIntent, AppError> {
+        Ok(DeletionIntent {
+            intent_id: request.request_id,
+            mode: DeletionMode::Full,
+            created_at: Utc::now(),
+            archive_tombstoned_at: None,
+            raw_purged_at: None,
+            derivatives_purged_at: None,
+            candidates_invalidated_at: None,
+            canonical_reviewed_at: None,
+            audit_appended_at: None,
+            completed_at: None,
+            tombstoned_event_count: 0,
+            pending_canonical_steps: vec!["purge_lexical_vector_derivatives".into()],
+        })
+    }
+    async fn run_deletion(
+        &self,
+        _: &Identity,
+        intent_id: Uuid,
+    ) -> Result<DeletionIntent, AppError> {
+        Ok(DeletionIntent {
+            intent_id,
+            mode: DeletionMode::Full,
+            created_at: Utc::now(),
+            archive_tombstoned_at: Some(Utc::now()),
+            raw_purged_at: Some(Utc::now()),
+            derivatives_purged_at: None,
+            candidates_invalidated_at: None,
+            canonical_reviewed_at: None,
+            audit_appended_at: None,
+            completed_at: None,
+            tombstoned_event_count: 0,
+            pending_canonical_steps: Vec::new(),
+        })
+    }
+    async fn mining_pending(
+        &self,
+        _: &Identity,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<ArchiveEvent>, AppError> {
+        Ok(Vec::new())
+    }
+    async fn advance_cursor(&self, _: &Identity, _: &str, _: i64) -> Result<(), AppError> {
+        Ok(())
+    }
+    async fn health(&self, _: &Identity) -> Result<ArchiveHealth, AppError> {
+        Ok(ArchiveHealth {
+            total_events: 0,
+            tombstoned_events: 0,
+            oldest_source_timestamp: None,
+            newest_source_timestamp: None,
+            max_ingestion_seq: 0,
+            incomplete_deletion_intents: 0,
+            eligible_embedding_events: 0,
+            embedded_events: 0,
+            pending_embedding_events: 0,
+            quarantined_embedding_events: 0,
+        })
+    }
+}
+
+#[derive(Clone, Default)]
+struct FakeContinuity;
+
+fn fake_handoff(context: &ContextRef, summary: &str) -> Handoff65 {
+    Handoff65 {
+        handoff_id: Uuid::new_v4(),
+        context_id: Uuid::new_v4(),
+        context_type: context.kind,
+        context_key: context.key.clone(),
+        producing_consumer_id: Uuid::new_v4(),
+        producing_thread_id: None,
+        producing_session_id: "s".into(),
+        summary: summary.into(),
+        content: json!({"summary": summary}),
+        status: "active".into(),
+        predecessor_handoff_id: None,
+        source_snapshot_revision: 0,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + Duration::hours(48),
+        items: Vec::new(),
+    }
+}
+
+#[async_trait]
+impl ContinuityStore for FakeContinuity {
+    async fn ready(&self) -> Result<(), AppError> {
+        Ok(())
+    }
+    async fn validate_context(
+        &self,
+        _: &Identity,
+        context: &ContextRef,
+    ) -> Result<ContextValidation, AppError> {
+        let reason = foreman_memory_v6::continuity::forbidden_context_reason(&context.key);
+        Ok(ContextValidation {
+            available: reason.is_none(),
+            context_type: context.kind,
+            normalized_key: context.key.clone(),
+            reason: reason.map(str::to_owned),
+            has_active_handoff: false,
+        })
+    }
+    async fn write(
+        &self,
+        _: &Identity,
+        request: &HandoffWriteInput,
+    ) -> Result<Handoff65, AppError> {
+        Ok(fake_handoff(&request.context, &request.summary))
+    }
+    async fn get_exact(&self, _: &Identity, _: &ContextRef) -> Result<Option<Handoff65>, AppError> {
+        Ok(None)
+    }
+    async fn acknowledge(&self, _: &Identity, request: &AckRequest) -> Result<AckResult, AppError> {
+        Ok(AckResult {
+            handoff_id: request.handoff_id,
+            newly_acknowledged: true,
+            first_acknowledged_at: Utc::now(),
+        })
+    }
+    async fn complete_items(
+        &self,
+        _: &Identity,
+        request: &CompleteItemsRequest,
+    ) -> Result<Handoff65, AppError> {
+        Ok(fake_handoff(
+            &ContextRef {
+                kind: ContextKind::Thread,
+                key: request.handoff_id.to_string(),
+                family_id: None,
+            },
+            "completed",
+        ))
+    }
+    async fn close(&self, _: &Identity, request: &CloseRequest) -> Result<CloseResult, AppError> {
+        Ok(CloseResult {
+            closed_handoff_id: request.expected_active_id,
+            status: "completed".into(),
+        })
+    }
+    async fn history(
+        &self,
+        _: &Identity,
+        _: &ContextRef,
+        _: usize,
+    ) -> Result<Vec<HandoffSummary>, AppError> {
+        Ok(Vec::new())
+    }
+}
+
+fn app_65() -> axum::Router {
+    let token_hash = hex::encode(Sha256::digest(b"correct-token"));
+    let grant = TokenGrant {
+        token_sha256: token_hash,
+        tenant_id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
+        consumer_id: Uuid::new_v4(),
+        actor: "test".into(),
+        role: TokenRole::Owner,
+    };
+    let auth = AuthConfig::new(vec![grant]).unwrap();
+    let state = AppState::new(Arc::new(FakeStore::default()), auth)
+        .unwrap()
+        .with_archive(Arc::new(FakeArchive))
+        .with_continuity(Arc::new(FakeContinuity));
+    router(state)
+}
+
+#[tokio::test]
+async fn v6_5_routes_require_authentication() {
+    let service = app_65();
+    for (path, body) in [
+        ("/v6.5/archive/events", json!({"events":[]})),
+        ("/v6.5/archive/search", json!({})),
+        ("/v6.5/archive/health", json!({})),
+        ("/v6.5/handoff/write", json!({})),
+        ("/v6.5/handoff/get_exact", json!({})),
+    ] {
+        let response = service
+            .clone()
+            .oneshot(post(path, body, false))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn archive_routes_are_unavailable_when_not_configured() {
+    let service = app(FakeStore::default());
+    let response = service
+        .oneshot(post("/v6.5/archive/events", json!({"events":[]}), true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn handoff_write_65_is_wired_and_returns_the_handoff() {
+    let service = app_65();
+    let body = json!({
+        "request_id": Uuid::new_v4(),
+        "context": {"kind":"repository_worktree","key":"git:test/repo@main"},
+        "session_id": "s1",
+        "summary": "continue the migration",
+        "written_by": "codex",
+        "next_actions": ["run clippy"]
+    });
+    let response = service
+        .oneshot(post("/v6.5/handoff/write", body, true))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let handoff = json_body(response).await;
+    assert_eq!(handoff["summary"], "continue the migration");
+    assert_eq!(handoff["context_key"], "git:test/repo@main");
+}
+
+#[tokio::test]
+async fn combined_health_reports_configured_planes() {
+    let with_planes = json_body(
+        app_65()
+            .oneshot(
+                Request::builder()
+                    .uri("/v6.5/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(with_planes["archive_configured"], true);
+    assert_eq!(with_planes["continuity"], true);
+
+    let without = json_body(
+        app(FakeStore::default())
+            .oneshot(
+                Request::builder()
+                    .uri("/v6.5/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(without["archive_configured"], false);
 }
