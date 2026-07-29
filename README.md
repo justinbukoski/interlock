@@ -1,6 +1,6 @@
 # Foreman Memory v6
 
-[![CI](https://github.com/justinbukoski63-star/foreman-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/justinbukoski63-star/foreman-memory/actions/workflows/ci.yml)
+[![CI](https://github.com/justinbukoski/foreman-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/justinbukoski/foreman-memory/actions/workflows/ci.yml)
 
 Foreman is a self-hosted durable memory service for AI coding agents. It records
 conversation prompts automatically, retrieves relevant context with hybrid
@@ -26,7 +26,7 @@ through the MCP tools.
 Requirements: Docker with Compose, Git, Rust/Cargo, Python 3, and OpenSSL.
 
 ```sh
-git clone https://github.com/justinbukoski63-star/foreman-memory.git
+git clone https://github.com/justinbukoski/foreman-memory.git
 cd foreman-memory
 ./distribution/install.sh
 ```
