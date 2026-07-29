@@ -1,5 +1,5 @@
--- Foreman Memory v6 owns this schema inside its dedicated database.
--- Run this migration only against a dedicated Foreman database.
+-- Interlock owns this schema inside its dedicated database.
+-- Run this migration only against a dedicated Interlock database.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 

@@ -1,4 +1,4 @@
-//! `foreman-spool` — the adapter-side durable capture queue CLI for Foreman 6.5.
+//! `interlock-spool` — the adapter-side durable capture queue CLI for Interlock 6.5.
 //!
 //! Capture adapters (Codex, Claude, Hermes, generic) shell out to this binary to
 //! append a captured conversation event durably before acknowledging the host
@@ -12,14 +12,14 @@
 //!   flush     POST pending events to the archive ingestion endpoint in order,
 //!             acknowledging the spool only after a durable 2xx per batch.
 //!
-//! Capture levels (`FOREMAN65_ADAPTER_LEVEL`):
+//! Capture levels (`INTERLOCK_ADAPTER_LEVEL`):
 //!   A  blocking      — on a full spool, exit non-zero so the host hook can block
 //!                      the turn. A Level A adapter may claim zero-loss capture.
 //!   B  gap-detecting — on a full spool, append a durable gap marker to the gap
 //!                      log, surface a red state, and exit with a distinct code.
 //!                      It never silently discards the event's existence.
 
-use foreman_memory_v6::spool::{Spool, SpoolCapacity, SpoolError};
+use interlock::spool::{Spool, SpoolCapacity, SpoolError};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -48,26 +48,26 @@ struct Config {
 impl Config {
     fn from_env() -> Result<Self, String> {
         let path = PathBuf::from(
-            std::env::var("FOREMAN65_SPOOL_PATH")
-                .map_err(|_| "FOREMAN65_SPOOL_PATH is required")?,
+            std::env::var("INTERLOCK_SPOOL_PATH")
+                .map_err(|_| "INTERLOCK_SPOOL_PATH is required")?,
         );
         if path.as_os_str().is_empty() {
-            return Err("FOREMAN65_SPOOL_PATH cannot be empty".into());
+            return Err("INTERLOCK_SPOOL_PATH cannot be empty".into());
         }
-        let max_records = parse_bound("FOREMAN65_SPOOL_MAX_RECORDS", 100_000)?;
-        let max_bytes = parse_bound("FOREMAN65_SPOOL_MAX_BYTES", 256 * 1024 * 1024)?;
+        let max_records = parse_bound("INTERLOCK_SPOOL_MAX_RECORDS", 100_000)?;
+        let max_bytes = parse_bound("INTERLOCK_SPOOL_MAX_BYTES", 256 * 1024 * 1024)?;
         let capacity =
             SpoolCapacity::new(max_records, max_bytes).map_err(|error| error.to_string())?;
-        let level = match std::env::var("FOREMAN65_ADAPTER_LEVEL").as_deref() {
+        let level = match std::env::var("INTERLOCK_ADAPTER_LEVEL").as_deref() {
             Ok("A") | Ok("a") => Level::A,
             Ok("B") | Ok("b") | Err(_) => Level::B,
             Ok(other) => {
                 return Err(format!(
-                    "FOREMAN65_ADAPTER_LEVEL must be A or B, got {other}"
+                    "INTERLOCK_ADAPTER_LEVEL must be A or B, got {other}"
                 ));
             }
         };
-        let gap_log = std::env::var("FOREMAN65_SPOOL_GAP_LOG")
+        let gap_log = std::env::var("INTERLOCK_SPOOL_GAP_LOG")
             .map(PathBuf::from)
             .unwrap_or_else(|_| path.with_extension("gaps"));
         Ok(Self {
@@ -92,7 +92,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("foreman-spool: {error}");
+            eprintln!("interlock-spool: {error}");
             ExitCode::from(EXIT_ERROR)
         }
     }
@@ -105,7 +105,7 @@ fn run() -> Result<u8, String> {
         "enqueue" => enqueue(&config),
         "status" => status(&config),
         "flush" => flush(&config),
-        "" => Err("usage: foreman-spool <enqueue|status|flush>".into()),
+        "" => Err("usage: interlock-spool <enqueue|status|flush>".into()),
         other => Err(format!("unknown command: {other}")),
     }
 }
@@ -210,11 +210,11 @@ fn status(config: &Config) -> Result<u8, String> {
 
 fn flush(config: &Config) -> Result<u8, String> {
     let base = loopback_url(
-        &std::env::var("FOREMAN_V6_URL").unwrap_or_else(|_| "http://127.0.0.1:8851".into()),
+        &std::env::var("INTERLOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8851".into()),
     )?;
-    let token = std::env::var("FOREMAN65_ADAPTER_TOKEN")
-        .map_err(|_| "FOREMAN65_ADAPTER_TOKEN is required to flush")?;
-    let batch_size: usize = parse_bound("FOREMAN65_FLUSH_BATCH", 128)? as usize;
+    let token = std::env::var("INTERLOCK_ADAPTER_TOKEN")
+        .map_err(|_| "INTERLOCK_ADAPTER_TOKEN is required to flush")?;
+    let batch_size: usize = parse_bound("INTERLOCK_FLUSH_BATCH", 128)? as usize;
     let mut spool = open(config)?;
     let mut delivered = 0u64;
     let client = ureq_agent()?;
@@ -312,10 +312,10 @@ mod url_lite {
         pub fn parse_loopback(input: &str) -> Result<Self, String> {
             let rest = input
                 .strip_prefix("http://")
-                .ok_or("FOREMAN_V6_URL must be loopback http")?;
+                .ok_or("INTERLOCK_URL must be loopback http")?;
             let authority = rest.split('/').next().unwrap_or(rest);
             if authority.is_empty() {
-                return Err("FOREMAN_V6_URL requires a host".into());
+                return Err("INTERLOCK_URL requires a host".into());
             }
             let (host, port) = match authority.rsplit_once(':') {
                 Some((host, port)) => (
@@ -330,7 +330,7 @@ mod url_lite {
                     .parse::<IpAddr>()
                     .is_ok_and(|address| address.is_loopback());
             if !loopback {
-                return Err("FOREMAN_V6_URL must target a loopback host".into());
+                return Err("INTERLOCK_URL must target a loopback host".into());
             }
             Ok(Self {
                 host: bare.to_string(),

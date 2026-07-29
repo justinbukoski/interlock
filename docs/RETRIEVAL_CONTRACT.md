@@ -1,4 +1,4 @@
-# Foreman Memory v6 Retrieval Contract
+# Interlock Retrieval Contract
 
 Status: normative design contract, 2026-07-19.
 

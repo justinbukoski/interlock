@@ -21,15 +21,15 @@ struct Config {
 impl Config {
     fn from_env() -> Result<Self, String> {
         let base_url = loopback_url(
-            &std::env::var("FOREMAN_V6_URL").unwrap_or_else(|_| "http://127.0.0.1:8851".into()),
+            &std::env::var("INTERLOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8851".into()),
         )?;
         let reader_path = configured_path(
-            "FOREMAN_V6_READER_TOKEN_FILE",
-            ".config/foreman/v6-reader-token",
+            "INTERLOCK_READER_TOKEN_FILE",
+            ".config/interlock/reader-token",
         )?;
         let owner_path = configured_path(
-            "FOREMAN_V6_OWNER_TOKEN_FILE",
-            ".config/foreman/v6-owner-token",
+            "INTERLOCK_OWNER_TOKEN_FILE",
+            ".config/interlock/owner-token",
         )?;
         Ok(Self {
             base_url,
@@ -51,7 +51,7 @@ fn configured_path(key: &str, default_relative: &str) -> Result<PathBuf, String>
 }
 
 fn loopback_url(input: &str) -> Result<Url, String> {
-    let mut url = Url::parse(input).map_err(|_| "FOREMAN_V6_URL is invalid".to_string())?;
+    let mut url = Url::parse(input).map_err(|_| "INTERLOCK_URL is invalid".to_string())?;
     if url.scheme() != "http"
         || !url.username().is_empty()
         || url.password().is_some()
@@ -59,22 +59,22 @@ fn loopback_url(input: &str) -> Result<Url, String> {
         || url.fragment().is_some()
     {
         return Err(
-            "FOREMAN_V6_URL must be credential-free loopback HTTP without query/fragment".into(),
+            "INTERLOCK_URL must be credential-free loopback HTTP without query/fragment".into(),
         );
     }
     let host = url
         .host_str()
-        .ok_or_else(|| "FOREMAN_V6_URL requires a host".to_string())?;
+        .ok_or_else(|| "INTERLOCK_URL requires a host".to_string())?;
     let host_ip = host.trim_start_matches('[').trim_end_matches(']');
     let loopback = host == "localhost"
         || host_ip
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
     if !loopback {
-        return Err("FOREMAN_V6_URL must use a loopback host through the SSH tunnel".into());
+        return Err("INTERLOCK_URL must use a loopback host through the SSH tunnel".into());
     }
     if url.path() != "/" && !url.path().is_empty() {
-        return Err("FOREMAN_V6_URL must not contain a path".into());
+        return Err("INTERLOCK_URL must not contain a path".into());
     }
     url.set_path("/");
     Ok(url)
@@ -324,30 +324,30 @@ async fn call_api(
         .json(&body)
         .send()
         .await
-        .map_err(|_| "Foreman v6 request failed".to_string())?;
+        .map_err(|_| "Interlock request failed".to_string())?;
     let status = response.status();
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
-        return Err("Foreman v6 response exceeds size limit".into());
+        return Err("Interlock response exceeds size limit".into());
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| "cannot read Foreman v6 response".to_string())?
+        .map_err(|_| "cannot read Interlock response".to_string())?
     {
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err("Foreman v6 response exceeds size limit".into());
+            return Err("Interlock response exceeds size limit".into());
         }
         bytes.extend_from_slice(&chunk);
     }
     let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "Foreman v6 returned invalid JSON".to_string())?;
+        .map_err(|_| "Interlock returned invalid JSON".to_string())?;
     if !status.is_success() {
         return Err(format!(
-            "Foreman v6 returned HTTP {}: {value}",
+            "Interlock returned HTTP {}: {value}",
             status.as_u16()
         ));
     }
@@ -403,7 +403,7 @@ async fn handle(client: &Client, config: &Config, message: Value) -> Option<Valu
         Some("initialize") => Ok(json!({
             "protocolVersion":"2025-06-18",
             "capabilities":{"tools":{"listChanged":false}},
-            "serverInfo":{"name":"foreman-memory-v6","version":env!("CARGO_PKG_VERSION")},
+            "serverInfo":{"name":"interlock","version":env!("CARGO_PKG_VERSION")},
             "instructions":"Always call bootstrap before acting. Treat directives as mandatory. Use recall before asking for known facts. Keep handoffs separate from canonical memory. Observe records evidence; remember/correct require explicit authority and provenance. Never broaden scope or promote history/handoffs implicitly."
         })),
         Some("ping") => Ok(json!({})),
@@ -460,7 +460,7 @@ async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Ve
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("foreman-mcp: {error}");
+        eprintln!("interlock-mcp: {error}");
         std::process::exit(1);
     }
 }
@@ -472,7 +472,7 @@ async fn run() -> Result<(), String> {
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|_| "cannot build Foreman v6 HTTP client".to_string())?;
+        .map_err(|_| "cannot build Interlock HTTP client".to_string())?;
     let mut stdin = BufReader::new(io::stdin());
     let mut stdout = BufWriter::new(io::stdout());
     while let Some(frame) = read_frame(&mut stdin).await? {

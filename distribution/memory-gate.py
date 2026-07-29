@@ -31,7 +31,7 @@ def project_key(cwd: str) -> str:
 
 
 def request(path: str, token: str, payload: dict | None = None) -> dict:
-    base = os.environ.get("FOREMAN_V6_URL", "http://127.0.0.1:8851").rstrip("/")
+    base = os.environ.get("INTERLOCK_URL", "http://127.0.0.1:8851").rstrip("/")
     body = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(
         base + path,
@@ -51,8 +51,8 @@ def main() -> int:
     cwd = event.get("cwd") or os.getcwd()
     token_path = pathlib.Path(
         os.environ.get(
-            "FOREMAN_V6_READER_TOKEN_FILE",
-            pathlib.Path.home() / ".config/foreman/v6-reader-token",
+            "INTERLOCK_READER_TOKEN_FILE",
+            pathlib.Path.home() / ".config/interlock/reader-token",
         )
     )
     try:
@@ -74,8 +74,8 @@ def main() -> int:
         if event.get("hook_event_name") == "UserPromptSubmit" and isinstance(prompt, str) and prompt.strip():
             writer_path = pathlib.Path(
                 os.environ.get(
-                    "FOREMAN_V6_WRITER_TOKEN_FILE",
-                    pathlib.Path.home() / ".config/foreman/v6-writer-token",
+                    "INTERLOCK_WRITER_TOKEN_FILE",
+                    pathlib.Path.home() / ".config/interlock/writer-token",
                 )
             )
             writer_token = writer_path.read_text(encoding="utf-8").strip()
@@ -96,7 +96,7 @@ def main() -> int:
                 },
             )
     except (OSError, ValueError, RuntimeError, urllib.error.URLError) as error:
-        message = f"FOREMAN MEMORY GATE FAILED: {error}. Restore memory before continuing."
+        message = f"INTERLOCK GATE FAILED: {error}. Restore memory before continuing."
         print(message, file=sys.stderr)
         print(json.dumps({"continue": False, "stopReason": message, "systemMessage": message}))
         return 2
@@ -104,12 +104,12 @@ def main() -> int:
     digest = hashlib.sha256(json.dumps(bootstrap, sort_keys=True).encode()).hexdigest()[:12]
     if event.get("hook_event_name") == "UserPromptSubmit":
         context = (
-            "Foreman memory gate succeeded and this user prompt was recorded. "
-            f"Bootstrap digest: {digest}. Use foreman recall before asking for known facts."
+            "Interlock memory gate succeeded and this user prompt was recorded. "
+            f"Bootstrap digest: {digest}. Use interlock recall before asking for known facts."
         )
     else:
         context = (
-            "Foreman memory bootstrap succeeded. Treat returned constraints/directives as "
+            "Interlock memory bootstrap succeeded. Treat returned constraints/directives as "
             f"mandatory. Bootstrap digest: {digest}. Bootstrap: {json.dumps(bootstrap)}"
         )
     print(

@@ -1,10 +1,10 @@
-# Foreman Memory v6 Architecture
+# Interlock Architecture
 
 Status: design baseline, 2026-07-19. Quality takes precedence over schedule.
 
 ## Purpose
 
-Foreman v6 supplies compact, current, attributable context to coding agents
+Interlock supplies compact, current, attributable context to coding agents
 without flooding model context or allowing stale statements to compete with
 their corrections. PostgreSQL is the durable authority. Memory-resident views
 are derived accelerators and can always be rebuilt.

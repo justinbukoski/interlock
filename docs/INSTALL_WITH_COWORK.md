@@ -1,4 +1,4 @@
-# Install Foreman Memory with an AI coworker
+# Install Interlock with an AI coworker
 
 ## Hardware and software
 
@@ -29,7 +29,7 @@ turn.
 
 Give the coworker this repository folder and the following prompt:
 
-> Install Foreman Memory locally. Read README.md,
+> Install Interlock locally. Read README.md,
 > docs/INSTALL_WITH_COWORK.md, and docs/PRIVACY_AND_DATA.md first. Confirm the
 > user understands that every user prompt will be recorded automatically after
 > hooks are enabled. Run `distribution/install.sh` without weakening its
@@ -42,7 +42,7 @@ Give the coworker this repository folder and the following prompt:
 > never print any token contents.
 >
 > Restart the client and prove enforcement twice: first show that a normal
-> session bootstrap succeeds; then stop the Foreman API and show that a new
+> session bootstrap succeeds; then stop the Interlock API and show that a new
 > prompt is blocked. Start the API again immediately after the failure test.
 > Report every file changed and provide the backup, upgrade, and erase commands.
 
@@ -67,7 +67,7 @@ Merge `integrations/claude/settings.json` into
 ### Claude Cowork
 
 Install the local MCP through Claude Desktop. Local enforcement and retrieval
-are unavailable while the desktop app and local Foreman service are not
+are unavailable while the desktop app and local Interlock service are not
 running. Hosted web/mobile sessions cannot independently enforce a local hook.
 
 ## What enforcement means

@@ -1,4 +1,4 @@
-//! Durable local capture spool for Foreman 6.5 conversation capture adapters.
+//! Durable local capture spool for Interlock 6.5 conversation capture adapters.
 //!
 //! The spool is the adapter-side half of the 6.5 continuity guarantee: an
 //! adapter appends a captured conversation event here and only acknowledges the
@@ -6,7 +6,7 @@
 //! Sudden process termination or power loss therefore cannot lose an event that
 //! received a capture acknowledgement.
 //!
-//! Design properties, mirroring `FOREMAN_6_5_DESIGN.md` §6.1 and the adversarial
+//! Design properties, mirroring `the 6.5 design document` §6.1 and the adversarial
 //! review's spool blockers:
 //!
 //! * **Flush before acknowledgement.** [`Spool::append`] fsyncs the record and
@@ -33,7 +33,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-/// Magic identifying a Foreman 6.5 spool file. Bumping the version byte is a
+/// Magic identifying a Interlock 6.5 spool file. Bumping the version byte is a
 /// forward-incompatible format change.
 const MAGIC: &[u8; 8] = b"F65SPOOL";
 const FORMAT_VERSION: u8 = 1;
@@ -536,7 +536,7 @@ mod tests {
         let mut dir = std::env::temp_dir();
         // Derive a unique-enough suffix without Date/rand (unavailable in tests).
         let unique = format!(
-            "foreman65-spool-{}-{}-{}",
+            "interlock65-spool-{}-{}-{}",
             std::process::id(),
             name,
             COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)

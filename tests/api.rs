@@ -4,7 +4,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use chrono::{Duration, Utc};
-use foreman_memory_v6::{
+use interlock::{
     AppState, ArchiveStore, AuthConfig, ContinuityStore, Identity, MemoryStore, TokenGrant,
     TokenRole,
     archive::{
@@ -49,7 +49,7 @@ impl MemoryStore for FakeStore {
         _: &Identity,
         _: &ScopeSelector,
         _: &str,
-        _: Option<&foreman_memory_v6::embedding::Embedding>,
+        _: Option<&interlock::embedding::Embedding>,
         _: RecallIntent,
         _: usize,
     ) -> Result<Vec<MemoryItem>, AppError> {
@@ -117,7 +117,7 @@ fn item(predicate: &str, rendered: impl Into<String>) -> MemoryItem {
     MemoryItem {
         id: Uuid::new_v4(),
         kind: MemoryKind::Proposition,
-        subject: "foreman".into(),
+        subject: "interlock".into(),
         predicate: predicate.into(),
         object: json!({"value":"test"}),
         rendered: rendered.into(),
@@ -378,7 +378,7 @@ async fn protected_routes_reject_oversized_bodies_before_deserialization() {
 }
 
 // ---------------------------------------------------------------------------
-// Foreman 6.5 archive + continuity route wiring (fake stores, no database).
+// Interlock 6.5 archive + continuity route wiring (fake stores, no database).
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
@@ -405,7 +405,7 @@ impl ArchiveStore for FakeArchive {
         &self,
         _: &Identity,
         _: &ArchiveSearchRequest,
-        _: Option<&foreman_memory_v6::embedding::Embedding>,
+        _: Option<&interlock::embedding::Embedding>,
     ) -> Result<Vec<ArchiveEventSummary>, AppError> {
         Ok(Vec::new())
     }
@@ -522,7 +522,7 @@ impl ContinuityStore for FakeContinuity {
         _: &Identity,
         context: &ContextRef,
     ) -> Result<ContextValidation, AppError> {
-        let reason = foreman_memory_v6::continuity::forbidden_context_reason(&context.key);
+        let reason = interlock::continuity::forbidden_context_reason(&context.key);
         Ok(ContextValidation {
             available: reason.is_none(),
             context_type: context.kind,

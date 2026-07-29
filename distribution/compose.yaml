@@ -1,17 +1,17 @@
-name: foreman-memory
+name: interlock
 
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: foreman
-      POSTGRES_PASSWORD: ${FOREMAN_DB_PASSWORD}
-      POSTGRES_DB: foreman
+      POSTGRES_USER: interlock
+      POSTGRES_PASSWORD: ${INTERLOCK_DB_PASSWORD}
+      POSTGRES_DB: interlock
     volumes:
-      - foreman-postgres:/var/lib/postgresql/data
+      - interlock-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U foreman -d foreman"]
+      test: ["CMD-SHELL", "pg_isready -U interlock -d interlock"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -21,13 +21,13 @@ services:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
-      POSTGRES_USER: foreman
-      POSTGRES_PASSWORD: ${FOREMAN_ARCHIVE_DB_PASSWORD}
-      POSTGRES_DB: foreman_archive
+      POSTGRES_USER: interlock
+      POSTGRES_PASSWORD: ${INTERLOCK_ARCHIVE_DB_PASSWORD}
+      POSTGRES_DB: interlock_archive
     volumes:
-      - foreman-archive-postgres:/var/lib/postgresql/data
+      - interlock-archive-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U foreman -d foreman_archive"]
+      test: ["CMD-SHELL", "pg_isready -U interlock -d interlock_archive"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -41,7 +41,7 @@ services:
       MODEL_ID: BAAI/bge-large-en-v1.5
       HF_HOME: /models
     volumes:
-      - foreman-models:/models
+      - interlock-models:/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8840/health')"]
       interval: 10s
@@ -54,30 +54,30 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    entrypoint: ["/usr/local/bin/foreman-migrate"]
+    entrypoint: ["/usr/local/bin/interlock-migrate"]
     restart: "no"
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      FOREMAN_V6_MIGRATION_DATABASE_URL: postgresql://foreman:${FOREMAN_DB_PASSWORD}@postgres:5432/foreman
-      FOREMAN_V6_MIGRATOR_ROLE: foreman
-      FOREMAN_V6_RUNTIME_ROLE: foreman
+      INTERLOCK_MIGRATION_DATABASE_URL: postgresql://interlock:${INTERLOCK_DB_PASSWORD}@postgres:5432/interlock
+      INTERLOCK_MIGRATOR_ROLE: interlock
+      INTERLOCK_RUNTIME_ROLE: interlock
     networks: [database]
 
   archive-migrate:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    entrypoint: ["/usr/local/bin/foreman-archive-migrate"]
+    entrypoint: ["/usr/local/bin/interlock-archive-migrate"]
     restart: "no"
     depends_on:
       archive-postgres:
         condition: service_healthy
     environment:
-      FOREMAN_V6_ARCHIVE_MIGRATION_DATABASE_URL: postgresql://foreman:${FOREMAN_ARCHIVE_DB_PASSWORD}@archive-postgres:5432/foreman_archive
-      FOREMAN_V6_ARCHIVE_MIGRATOR_ROLE: foreman
-      FOREMAN_V6_ARCHIVE_RUNTIME_ROLE: foreman
+      INTERLOCK_ARCHIVE_MIGRATION_DATABASE_URL: postgresql://interlock:${INTERLOCK_ARCHIVE_DB_PASSWORD}@archive-postgres:5432/interlock_archive
+      INTERLOCK_ARCHIVE_MIGRATOR_ROLE: interlock
+      INTERLOCK_ARCHIVE_RUNTIME_ROLE: interlock
     networks: [archive-database]
 
   api:
@@ -93,21 +93,21 @@ services:
       embedder:
         condition: service_healthy
     environment:
-      FOREMAN_V6_DATABASE_URL: postgresql://foreman:${FOREMAN_DB_PASSWORD}@postgres:5432/foreman
-      FOREMAN_V6_ARCHIVE_DATABASE_URL: postgresql://foreman:${FOREMAN_ARCHIVE_DB_PASSWORD}@archive-postgres:5432/foreman_archive
-      FOREMAN_V6_AUTH_FILE: /run/foreman/auth.json
-      FOREMAN_V6_LISTEN: 0.0.0.0:8851
-      FOREMAN_V6_TRUSTED_PROXY: "true"
-      FOREMAN_V6_EMBEDDER_URL: http://embedder:8840
-      FOREMAN_V6_EMBEDDING_MODEL: BAAI/bge-large-en-v1.5
-      RUST_LOG: foreman_memory_v6=info
+      INTERLOCK_DATABASE_URL: postgresql://interlock:${INTERLOCK_DB_PASSWORD}@postgres:5432/interlock
+      INTERLOCK_ARCHIVE_DATABASE_URL: postgresql://interlock:${INTERLOCK_ARCHIVE_DB_PASSWORD}@archive-postgres:5432/interlock_archive
+      INTERLOCK_AUTH_FILE: /run/interlock/auth.json
+      INTERLOCK_LISTEN: 0.0.0.0:8851
+      INTERLOCK_TRUSTED_PROXY: "true"
+      INTERLOCK_EMBEDDER_URL: http://embedder:8840
+      INTERLOCK_EMBEDDING_MODEL: BAAI/bge-large-en-v1.5
+      RUST_LOG: interlock=info
     volumes:
-      - ./state/auth.json:/run/foreman/auth.json:ro
-    user: "${FOREMAN_UID:-1000}:${FOREMAN_GID:-1000}"
+      - ./state/auth.json:/run/interlock/auth.json:ro
+    user: "${INTERLOCK_UID:-1000}:${INTERLOCK_GID:-1000}"
     ports:
-      - "127.0.0.1:${FOREMAN_PORT:-8851}:8851"
+      - "127.0.0.1:${INTERLOCK_PORT:-8851}:8851"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/foreman-healthcheck", "--http", "127.0.0.1:8851", "/v6/health"]
+      test: ["CMD", "/usr/local/bin/interlock-healthcheck", "--http", "127.0.0.1:8851", "/v6/health"]
       interval: 10s
       timeout: 5s
       retries: 20
@@ -122,9 +122,9 @@ services:
     networks: [access, database, archive-database, embedding]
 
 volumes:
-  foreman-postgres:
-  foreman-archive-postgres:
-  foreman-models:
+  interlock-postgres:
+  interlock-archive-postgres:
+  interlock-models:
 
 networks:
   access:

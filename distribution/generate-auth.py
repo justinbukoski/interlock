@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create stable Foreman identity state and regenerate token grants safely."""
+"""Create stable Interlock identity state and regenerate token grants safely."""
 
 import argparse
 import json

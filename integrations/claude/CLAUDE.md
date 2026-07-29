@@ -1,8 +1,8 @@
-# Foreman Memory — mandatory operating rules
+# Interlock — mandatory operating rules
 
-Foreman v6 must be available before handling any request in this workspace.
+Interlock must be available before handling any request in this workspace.
 
-1. Call the Foreman `bootstrap` tool before acting and after resume or compaction.
+1. Call the Interlock `bootstrap` tool before acting and after resume or compaction.
 2. Obey returned constraints and directives.
 3. Recall before asking for facts the user may have already supplied.
 4. Observe relevant conversation turns; observation is evidence, not canonical truth.

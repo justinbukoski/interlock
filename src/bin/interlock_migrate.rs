@@ -14,9 +14,9 @@ fn identifier(name: &str) -> Result<&str, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let url = std::env::var("FOREMAN_V6_MIGRATION_DATABASE_URL")?;
-    let migrator_name = std::env::var("FOREMAN_V6_MIGRATOR_ROLE")?;
-    let runtime_name = std::env::var("FOREMAN_V6_RUNTIME_ROLE")?;
+    let url = std::env::var("INTERLOCK_MIGRATION_DATABASE_URL")?;
+    let migrator_name = std::env::var("INTERLOCK_MIGRATOR_ROLE")?;
+    let runtime_name = std::env::var("INTERLOCK_RUNTIME_ROLE")?;
     let migrator = identifier(&migrator_name)?;
     let runtime = identifier(&runtime_name)?;
     let pool = PgPoolOptions::new()

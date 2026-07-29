@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/.local/bin/foreman-memory-gate\"",
+            "command": "\"$HOME/.local/bin/interlock-gate\"",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$HOME/.local/bin/foreman-memory-gate\"",
+            "command": "\"$HOME/.local/bin/interlock-gate\"",
             "timeout": 10
           }
         ]

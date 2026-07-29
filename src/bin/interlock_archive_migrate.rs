@@ -1,6 +1,6 @@
-//! One-shot migrator for the Foreman 6.5 conversation archive database. It runs
+//! One-shot migrator for the Interlock 6.5 conversation archive database. It runs
 //! against the SEPARATE archive database, never the v6 canonical database or v5.
-//! Mirrors `foreman_migrate` role handling: a non-login migrator role owns schema
+//! Mirrors `interlock_migrate` role handling: a non-login migrator role owns schema
 //! objects and the runtime role is granted least-privilege DML only.
 
 use sqlx::postgres::PgPoolOptions;
@@ -19,9 +19,9 @@ fn identifier(name: &str) -> Result<&str, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let url = std::env::var("FOREMAN_V6_ARCHIVE_MIGRATION_DATABASE_URL")?;
-    let migrator_name = std::env::var("FOREMAN_V6_ARCHIVE_MIGRATOR_ROLE")?;
-    let runtime_name = std::env::var("FOREMAN_V6_ARCHIVE_RUNTIME_ROLE")?;
+    let url = std::env::var("INTERLOCK_ARCHIVE_MIGRATION_DATABASE_URL")?;
+    let migrator_name = std::env::var("INTERLOCK_ARCHIVE_MIGRATOR_ROLE")?;
+    let runtime_name = std::env::var("INTERLOCK_ARCHIVE_RUNTIME_ROLE")?;
     let migrator = identifier(&migrator_name)?;
     let runtime = identifier(&runtime_name)?;
     let pool = PgPoolOptions::new()

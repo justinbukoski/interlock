@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use foreman_memory_v6::{
+use interlock::{
     Identity, MemoryStore, PgMemoryStore, TokenRole,
     domain::{
         Authority, CandidatePromotionRequest, CandidateState, CandidateWriteRequest,
@@ -227,7 +227,7 @@ fn write(
     MemoryWriteRequest {
         request_id,
         scope,
-        subject: "foreman-v6".into(),
+        subject: "interlock-v6".into(),
         predicate: "project.state".into(),
         object: json!({"value":value}),
         authority,
@@ -675,7 +675,7 @@ async fn postgres_migration_supersession_scope_and_lane_invariants() {
     assert_eq!(
         count(
             &pool,
-            "SELECT count(*) FROM propositions WHERE tenant_id=$1 AND subject_key='foreman-v6' AND status='current'",
+            "SELECT count(*) FROM propositions WHERE tenant_id=$1 AND subject_key='interlock-v6' AND status='current'",
             tenant
         )
         .await,
@@ -713,7 +713,7 @@ async fn postgres_migration_supersession_scope_and_lane_invariants() {
         .recall(
             &codex,
             &repository_scope,
-            "foreman v6",
+            "interlock v6",
             None,
             RecallIntent::Current,
             20,

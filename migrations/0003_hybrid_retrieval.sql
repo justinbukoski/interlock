@@ -6,7 +6,7 @@ DECLARE installed text;
 BEGIN
   SELECT extversion INTO installed FROM pg_extension WHERE extname = 'vector';
   IF installed IS NULL OR string_to_array(installed, '.')::int[] < ARRAY[0,8,2] THEN
-    RAISE EXCEPTION 'Foreman Memory v6 requires pgvector >= 0.8.2 (installed: %)', installed;
+    RAISE EXCEPTION 'Interlock requires pgvector >= 0.8.2 (installed: %)', installed;
   END IF;
 END $$;
 

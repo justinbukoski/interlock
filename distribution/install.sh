@@ -5,7 +5,7 @@ umask 077
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 dist="$root/distribution"
 state="$dist/state"
-config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/foreman"
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/interlock"
 mkdir -p "$state" "$config_dir" "$HOME/.local/bin"
 
 for command in cargo docker git openssl python3; do
@@ -26,11 +26,11 @@ chmod 0600 "$reader_file" "$writer_file" "$owner_file"
 
 env_file="$dist/.env"
 if [[ ! -f "$env_file" ]]; then
-  printf 'FOREMAN_DB_PASSWORD=%s\nFOREMAN_PORT=8851\nFOREMAN_UID=%s\nFOREMAN_GID=%s\n' \
+  printf 'INTERLOCK_DB_PASSWORD=%s\nINTERLOCK_PORT=8851\nINTERLOCK_UID=%s\nINTERLOCK_GID=%s\n' \
     "$(openssl rand -hex 32)" "$(id -u)" "$(id -g)" >"$env_file"
 fi
-grep -q '^FOREMAN_ARCHIVE_DB_PASSWORD=' "$env_file" || \
-  printf 'FOREMAN_ARCHIVE_DB_PASSWORD=%s\n' "$(openssl rand -hex 32)" >>"$env_file"
+grep -q '^INTERLOCK_ARCHIVE_DB_PASSWORD=' "$env_file" || \
+  printf 'INTERLOCK_ARCHIVE_DB_PASSWORD=%s\n' "$(openssl rand -hex 32)" >>"$env_file"
 chmod 0600 "$env_file"
 
 sha256() {
@@ -53,11 +53,11 @@ python3 "$dist/generate-auth.py" \
 docker compose --env-file "$env_file" -f "$dist/compose.yaml" \
   up -d --build --wait --wait-timeout 900
 
-cargo build --locked --release --bin foreman_mcp
-install -m 0755 "$root/target/release/foreman_mcp" "$HOME/.local/bin/foreman-mcp"
-install -m 0755 "$dist/memory-gate.py" "$HOME/.local/bin/foreman-memory-gate"
+cargo build --locked --release --bin interlock_mcp
+install -m 0755 "$root/target/release/interlock_mcp" "$HOME/.local/bin/interlock-mcp"
+install -m 0755 "$dist/memory-gate.py" "$HOME/.local/bin/interlock-gate"
 
-foreman_port=$(awk -F= '$1 == "FOREMAN_PORT" { print $2; exit }' "$env_file")
+interlock_port=$(awk -F= '$1 == "INTERLOCK_PORT" { print $2; exit }' "$env_file")
 echo
-echo "Foreman Memory is running on http://127.0.0.1:${foreman_port:-8851}."
+echo "Interlock is running on http://127.0.0.1:${interlock_port:-8851}."
 echo "Next: follow docs/INSTALL_WITH_COWORK.md to connect and enforce it."

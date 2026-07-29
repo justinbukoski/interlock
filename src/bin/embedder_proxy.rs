@@ -8,8 +8,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
-    let listen = std::env::var("FOREMAN_PROXY_LISTEN").unwrap_or_else(|_| "0.0.0.0:8840".into());
-    let target = std::env::var("FOREMAN_PROXY_TARGET")?;
+    let listen = std::env::var("INTERLOCK_PROXY_LISTEN").unwrap_or_else(|_| "0.0.0.0:8840".into());
+    let target = std::env::var("INTERLOCK_PROXY_TARGET")?;
     if ![
         "172.31.60.1:8840",
         "172.31.61.10:8851",

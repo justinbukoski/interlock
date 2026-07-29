@@ -1,4 +1,4 @@
--- Foreman Memory 6.5 conversation archive. This schema lives in its OWN
+-- Interlock 6.5 conversation archive. This schema lives in its OWN
 -- PostgreSQL database, separate from the v6 canonical-memory database. It is the
 -- irreplaceable continuity source: append-only, lossless, and replayable.
 -- Never run this migration against the v5 or the v6 canonical database.

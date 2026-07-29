@@ -1,4 +1,4 @@
-use foreman_memory_v6::{
+use interlock::{
     AppState, AuthConfig, HttpEmbedder, PgArchiveStore, PgContinuityStore, PgMemoryStore,
     TokenGrant, router,
 };
@@ -25,22 +25,22 @@ struct Config {
 
 impl Config {
     fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let database_url = std::env::var("FOREMAN_V6_DATABASE_URL")?;
-        let archive_database_url = std::env::var("FOREMAN_V6_ARCHIVE_DATABASE_URL").ok();
-        let auth_file = PathBuf::from(std::env::var("FOREMAN_V6_AUTH_FILE")?);
-        let listen: SocketAddr = std::env::var("FOREMAN_V6_LISTEN")
+        let database_url = std::env::var("INTERLOCK_DATABASE_URL")?;
+        let archive_database_url = std::env::var("INTERLOCK_ARCHIVE_DATABASE_URL").ok();
+        let auth_file = PathBuf::from(std::env::var("INTERLOCK_AUTH_FILE")?);
+        let listen: SocketAddr = std::env::var("INTERLOCK_LISTEN")
             .unwrap_or_else(|_| "127.0.0.1:8851".into())
             .parse()?;
         let trusted_proxy =
-            std::env::var("FOREMAN_V6_TRUSTED_PROXY").is_ok_and(|value| value == "true");
-        let embedder_url = std::env::var("FOREMAN_V6_EMBEDDER_URL").ok();
-        let embedding_model = std::env::var("FOREMAN_V6_EMBEDDING_MODEL")
+            std::env::var("INTERLOCK_TRUSTED_PROXY").is_ok_and(|value| value == "true");
+        let embedder_url = std::env::var("INTERLOCK_EMBEDDER_URL").ok();
+        let embedding_model = std::env::var("INTERLOCK_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "BAAI/bge-large-en-v1.5".into());
         if embedding_model.is_empty() || embedding_model.len() > 128 {
-            return Err("FOREMAN_V6_EMBEDDING_MODEL must be 1..128 bytes".into());
+            return Err("INTERLOCK_EMBEDDING_MODEL must be 1..128 bytes".into());
         }
         if !listen.ip().is_loopback() && !trusted_proxy {
-            return Err("non-loopback listen requires FOREMAN_V6_TRUSTED_PROXY=true".into());
+            return Err("non-loopback listen requires INTERLOCK_TRUSTED_PROXY=true".into());
         }
         Ok(Self {
             database_url,
@@ -76,13 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let metadata = auth_handle.metadata()?;
         if !metadata.file_type().is_file() {
-            return Err("FOREMAN_V6_AUTH_FILE must be a regular file".into());
+            return Err("INTERLOCK_AUTH_FILE must be a regular file".into());
         }
         if metadata.uid() != nix::unistd::Uid::current().as_raw() {
-            return Err("FOREMAN_V6_AUTH_FILE must be owned by the service user".into());
+            return Err("INTERLOCK_AUTH_FILE must be owned by the service user".into());
         }
         if metadata.permissions().mode() & 0o077 != 0 {
-            return Err("FOREMAN_V6_AUTH_FILE must not be group/world accessible".into());
+            return Err("INTERLOCK_AUTH_FILE must not be group/world accessible".into());
         }
     }
     let auth_file: AuthFile = serde_json::from_reader(auth_handle)?;
@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         embedding_worker = Some((worker_id, handle));
     }
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
-    tracing::info!(address = %config.listen, trusted_proxy = config.trusted_proxy, "Foreman Memory v6 listening");
+    tracing::info!(address = %config.listen, trusted_proxy = config.trusted_proxy, "Interlock listening");
     let shutdown_notifier = shutdown_tx.clone();
     let server_result = axum::serve(listener, router(state))
         .with_graceful_shutdown(async move {

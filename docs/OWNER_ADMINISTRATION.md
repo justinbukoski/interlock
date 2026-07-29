@@ -14,7 +14,7 @@ For a deliberate administrative session, make a separate copy of the MCP
 configuration and add:
 
 ```text
-FOREMAN_V6_OWNER_TOKEN_FILE=/absolute/path/to/.config/foreman/v6-owner-token
+INTERLOCK_OWNER_TOKEN_FILE=/absolute/path/to/.config/interlock/owner-token
 ```
 
 Restart that client, perform the narrow administrative change, review the audit

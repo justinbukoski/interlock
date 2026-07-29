@@ -1,11 +1,11 @@
 [features]
 hooks = true
 
-[mcp_servers.foreman-v6]
+[mcp_servers.interlock-v6]
 enabled = true
 required = true
-command = "/ABSOLUTE/HOME/.local/bin/foreman-mcp"
-env = { FOREMAN_V6_URL = "http://127.0.0.1:8851", FOREMAN_V6_READER_TOKEN_FILE = "/ABSOLUTE/HOME/.config/foreman/v6-reader-token", FOREMAN_V6_WRITER_TOKEN_FILE = "/ABSOLUTE/HOME/.config/foreman/v6-writer-token" }
+command = "/ABSOLUTE/HOME/.local/bin/interlock-mcp"
+env = { INTERLOCK_URL = "http://127.0.0.1:8851", INTERLOCK_READER_TOKEN_FILE = "/ABSOLUTE/HOME/.config/interlock/reader-token", INTERLOCK_WRITER_TOKEN_FILE = "/ABSOLUTE/HOME/.config/interlock/writer-token" }
 startup_timeout_sec = 10.0
 tool_timeout_sec = 30.0
 
@@ -14,14 +14,14 @@ matcher = "startup|resume|clear|compact"
 
 [[hooks.SessionStart.hooks]]
 type = "command"
-command = '"$HOME/.local/bin/foreman-memory-gate"'
+command = '"$HOME/.local/bin/interlock-gate"'
 timeout = 10
-statusMessage = "Loading mandatory Foreman memory"
+statusMessage = "Loading mandatory Interlock memory"
 
 [[hooks.UserPromptSubmit]]
 
 [[hooks.UserPromptSubmit.hooks]]
 type = "command"
-command = '"$HOME/.local/bin/foreman-memory-gate"'
+command = '"$HOME/.local/bin/interlock-gate"'
 timeout = 10
-statusMessage = "Checking Foreman memory"
+statusMessage = "Checking Interlock memory"

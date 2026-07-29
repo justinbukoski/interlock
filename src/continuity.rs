@@ -1,4 +1,4 @@
-//! Foreman Memory 6.5 continuity handoff repair (design §9.1).
+//! Interlock 6.5 continuity handoff repair (design §9.1).
 //!
 //! Handoffs are a first-class lifecycle subsystem selected by a typed
 //! `context_key`, never by an arbitrary filesystem path. Supersession is a
@@ -904,10 +904,10 @@ mod tests {
     #[test]
     fn legitimate_typed_keys_are_allowed() {
         for key in [
-            "git:github.com/justin/foreman@main",
-            "durable-project:foreman-v6",
+            "git:github.com/justin/interlock@main",
+            "durable-project:interlock-v6",
             "thread:codex-01H8X...",
-            "/home/justin/Projects/foreman-v6", // deeper than a home root
+            "/home/justin/Projects/interlock-v6", // deeper than a home root
         ] {
             assert!(
                 forbidden_context_reason(key).is_none(),

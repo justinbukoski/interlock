@@ -1,5 +1,5 @@
 [package]
-name = "foreman-memory-v6"
+name = "interlock"
 version = "6.5.0"
 edition = "2024"
 license = "MIT"

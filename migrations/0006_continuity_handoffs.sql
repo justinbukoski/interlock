@@ -1,4 +1,4 @@
--- Foreman Memory 6.5 continuity handoff repair (design §9.1). Handoffs become a
+-- Interlock 6.5 continuity handoff repair (design §9.1). Handoffs become a
 -- first-class lifecycle subsystem with exact typed context keys and
 -- compare-and-swap supersession. They live in a DEDICATED schema so a later
 -- operational split can move them to their own database without changing the

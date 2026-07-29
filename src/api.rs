@@ -504,7 +504,7 @@ async fn write_handoff(
 }
 
 // ---------------------------------------------------------------------------
-// Foreman 6.5 combined health, archive, and continuity handoff endpoints.
+// Interlock 6.5 combined health, archive, and continuity handoff endpoints.
 // ---------------------------------------------------------------------------
 
 async fn readiness_65(State(state): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {

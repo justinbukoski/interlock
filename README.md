@@ -1,8 +1,14 @@
-# Foreman Memory v6
+# Interlock
 
-[![CI](https://github.com/justinbukoski/foreman-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/justinbukoski/foreman-memory/actions/workflows/ci.yml)
+[![CI](https://github.com/justinbukoski/interlock/actions/workflows/ci.yml/badge.svg)](https://github.com/justinbukoski/interlock/actions/workflows/ci.yml)
 
-Foreman is a self-hosted durable memory service for AI coding agents. It records
+**Interlock** (formerly Foreman Memory) is named for the machine-safety device
+that refuses to let equipment run unless the guard is in place. The same rule
+applies here: if the memory service is unreachable at session start, the agent
+halts instead of proceeding on fabricated context. Fail-closed is not a
+feature of this system; it is the thesis.
+
+Interlock is a self-hosted durable memory service for AI coding agents. It records
 conversation prompts automatically, retrieves relevant context with hybrid
 semantic search, and keeps raw history, candidate facts, canonical memory, and
 short-lived handoffs in separate lanes.
@@ -32,8 +38,8 @@ through the MCP tools.
 Requirements: Docker with Compose, Git, Rust/Cargo, Python 3, and OpenSSL.
 
 ```sh
-git clone https://github.com/justinbukoski/foreman-memory.git
-cd foreman-memory
+git clone https://github.com/justinbukoski/interlock.git
+cd interlock
 ./distribution/install.sh
 ```
 
@@ -47,13 +53,13 @@ every user understands what is stored and how to export or erase it.
 
 ## How retrieval works
 
-Agents normally retrieve memories through `foreman-mcp`, not through a remote
+Agents normally retrieve memories through `interlock-mcp`, not through a remote
 shell bridge. At session start, `bootstrap` loads constraints, directives, and
 high-value context. During work, `recall` performs scoped hybrid retrieval and
 `history` searches the observation lane. The hooks also fail closed if the
 service cannot be reached.
 
-A shell MCP is optional and useful only when Foreman runs on another machine
+A shell MCP is optional and useful only when Interlock runs on another machine
 that the agent's normal sandbox cannot reach.
 
 ## Security model

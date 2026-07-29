@@ -1,4 +1,4 @@
-# Foreman Memory v6 Data Model
+# Interlock Data Model
 
 Status: normative design contract, 2026-07-19.
 

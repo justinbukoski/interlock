@@ -1,4 +1,4 @@
-//! Foreman Memory 6.5 conversation archive: the durable, replayable continuity
+//! Interlock 6.5 conversation archive: the durable, replayable continuity
 //! source. This module owns the archive database (separate from v6 canonical
 //! memory), authenticated idempotent batch ingestion, evidence retrieval,
 //! normalized search, export, the owner deletion saga, the ingestion-order
@@ -302,7 +302,7 @@ pub fn derivation_key(
         .collect();
     ids.sort();
     let mut hasher = Sha256::new();
-    hasher.update(b"foreman-6.5-derivation-v1");
+    hasher.update(b"interlock-6.5-derivation-v1");
     hasher.update([0]);
     hasher.update(generation_id.as_bytes());
     hasher.update([0]);

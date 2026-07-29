@@ -1,10 +1,10 @@
-//! Foreman 6.5 continuity-handoff integration tests. These run against the v6
+//! Interlock 6.5 continuity-handoff integration tests. These run against the v6
 //! canonical database (which carries the `continuity` schema in migration 6) and
 //! are ignored by default. They prove exact-context isolation, compare-and-swap
 //! supersession with a single winner, idempotent acknowledgement, clean closure,
 //! and that a handoff has no path into candidates or propositions.
 
-use foreman_memory_v6::{
+use interlock::{
     Identity, PgContinuityStore, PgMemoryStore, TokenRole,
     continuity::{
         AckRequest, CloseRequest, CompleteItemsRequest, ContextKind, ContextRef, ContinuityStore,

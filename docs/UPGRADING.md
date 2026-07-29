@@ -26,8 +26,8 @@ Stop all connected agents, replace the desired token file with a new random
 are regenerated while identities remain stable:
 
 ```sh
-openssl rand -hex 32 > ~/.config/foreman/v6-writer-token
-chmod 0600 ~/.config/foreman/v6-writer-token
+openssl rand -hex 32 > ~/.config/interlock/writer-token
+chmod 0600 ~/.config/interlock/writer-token
 ./distribution/install.sh
 ```
 
@@ -36,6 +36,6 @@ after rotation.
 
 ## Uninstall
 
-Disable the Foreman hooks and MCP entries in each agent first. Then follow
+Disable the Interlock hooks and MCP entries in each agent first. Then follow
 “Delete everything” in `docs/PRIVACY_AND_DATA.md`. Removing volumes erases all
 stored data and cannot be undone without a backup.

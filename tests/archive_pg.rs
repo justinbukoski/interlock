@@ -1,10 +1,10 @@
-//! Foreman 6.5 conversation-archive integration tests. These require a
+//! Interlock 6.5 conversation-archive integration tests. These require a
 //! disposable PostgreSQL database reachable at TEST_ARCHIVE_DATABASE_URL and are
 //! ignored by default, matching the existing v6 PostgreSQL test convention. They
 //! prove idempotent replay/dedup, ingestion-order mining cursors, tenant/user
 //! isolation, and the resumable deletion-saga foundation.
 
-use foreman_memory_v6::{
+use interlock::{
     Identity, PgArchiveStore, TokenRole,
     archive::{
         ArchiveActor, ArchiveEventInput, ArchiveEventKind, ArchiveExportRequest,
@@ -29,7 +29,7 @@ fn event(source_event_id: &str, content: &str, seconds_ago: i64) -> ArchiveEvent
     ArchiveEventInput {
         source_event_id: source_event_id.into(),
         installation_id: Uuid::from_u128(0xA11),
-        project_key: Some("git:test/foreman".into()),
+        project_key: Some("git:test/interlock".into()),
         repository_key: None,
         thread_id: Some("thread-1".into()),
         session_id: Some("session-1".into()),

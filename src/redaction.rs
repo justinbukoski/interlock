@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn leaves_operational_non_secrets_intact() {
         let input =
-            "Foreman v6 listens on 127.0.0.1:8851, commit 54f5ec0 passed, event 1234567890123";
+            "Interlock listens on 127.0.0.1:8851, commit 54f5ec0 passed, event 1234567890123";
         assert_eq!(redact(input), (input.to_owned(), 0));
     }
 
