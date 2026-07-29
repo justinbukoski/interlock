@@ -445,7 +445,7 @@ mod tests {
     fn endpoint_requires_loopback() {
         assert!(loopback_url("http://127.0.0.1:8851").is_ok());
         assert!(loopback_url("http://[::1]:8851").is_ok());
-        assert!(loopback_url("http://192.168.68.86:8851").is_err());
+        assert!(loopback_url("http://192.168.1.10:8851").is_err());
         assert!(loopback_url("https://example.com").is_err());
         assert!(loopback_url("http://127.0.0.1:8851/path").is_err());
     }
