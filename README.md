@@ -84,6 +84,7 @@ cargo test --locked
 cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
-The ignored PostgreSQL integration test requires a disposable PostgreSQL 15+
-database with pgvector 0.8.2+ through `TEST_DATABASE_URL`. Never point it at a
-persistent database.
+The ignored PostgreSQL integration tests require disposable PostgreSQL 15+
+databases with pgvector 0.8.2+ through `TEST_DATABASE_URL` and
+`TEST_ARCHIVE_DATABASE_URL`. Run them with `--test-threads=1`, use each
+database for a single run, and never point them at a persistent database.
