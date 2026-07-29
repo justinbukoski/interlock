@@ -29,6 +29,8 @@ if [[ ! -f "$env_file" ]]; then
   printf 'FOREMAN_DB_PASSWORD=%s\nFOREMAN_PORT=8851\nFOREMAN_UID=%s\nFOREMAN_GID=%s\n' \
     "$(openssl rand -hex 32)" "$(id -u)" "$(id -g)" >"$env_file"
 fi
+grep -q '^FOREMAN_ARCHIVE_DB_PASSWORD=' "$env_file" || \
+  printf 'FOREMAN_ARCHIVE_DB_PASSWORD=%s\n' "$(openssl rand -hex 32)" >>"$env_file"
 chmod 0600 "$env_file"
 
 sha256() {

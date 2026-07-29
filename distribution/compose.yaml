@@ -17,6 +17,22 @@ services:
       retries: 20
     networks: [database]
 
+  archive-postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foreman
+      POSTGRES_PASSWORD: ${FOREMAN_ARCHIVE_DB_PASSWORD}
+      POSTGRES_DB: foreman_archive
+    volumes:
+      - foreman-archive-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foreman -d foreman_archive"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [archive-database]
+
   embedder:
     build:
       context: ./embedder
@@ -49,6 +65,21 @@ services:
       FOREMAN_V6_RUNTIME_ROLE: foreman
     networks: [database]
 
+  archive-migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    entrypoint: ["/usr/local/bin/foreman-archive-migrate"]
+    restart: "no"
+    depends_on:
+      archive-postgres:
+        condition: service_healthy
+    environment:
+      FOREMAN_V6_ARCHIVE_MIGRATION_DATABASE_URL: postgresql://foreman:${FOREMAN_ARCHIVE_DB_PASSWORD}@archive-postgres:5432/foreman_archive
+      FOREMAN_V6_ARCHIVE_MIGRATOR_ROLE: foreman
+      FOREMAN_V6_ARCHIVE_RUNTIME_ROLE: foreman
+    networks: [archive-database]
+
   api:
     build:
       context: ..
@@ -57,15 +88,17 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      archive-migrate:
+        condition: service_completed_successfully
       embedder:
         condition: service_healthy
     environment:
       FOREMAN_V6_DATABASE_URL: postgresql://foreman:${FOREMAN_DB_PASSWORD}@postgres:5432/foreman
+      FOREMAN_V6_ARCHIVE_DATABASE_URL: postgresql://foreman:${FOREMAN_ARCHIVE_DB_PASSWORD}@archive-postgres:5432/foreman_archive
       FOREMAN_V6_AUTH_FILE: /run/foreman/auth.json
       FOREMAN_V6_LISTEN: 0.0.0.0:8851
       FOREMAN_V6_TRUSTED_PROXY: "true"
       FOREMAN_V6_EMBEDDER_URL: http://embedder:8840
-      FOREMAN_V6_EMBEDDER_ALLOWED_HOST: embedder
       FOREMAN_V6_EMBEDDING_MODEL: BAAI/bge-large-en-v1.5
       RUST_LOG: foreman_memory_v6=info
     volumes:
@@ -86,15 +119,18 @@ services:
     # Docker does not publish host ports for containers attached only to
     # internal networks. The access network exists solely to make the
     # loopback-only port mapping effective.
-    networks: [access, database, embedding]
+    networks: [access, database, archive-database, embedding]
 
 volumes:
   foreman-postgres:
+  foreman-archive-postgres:
   foreman-models:
 
 networks:
   access:
   database:
+    internal: true
+  archive-database:
     internal: true
   embedding:
     internal: true
