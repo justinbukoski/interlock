@@ -461,33 +461,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
-name = "interlock"
-version = "6.5.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "hex",
- "http",
- "insta",
- "nix",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "sqlx",
- "subtle",
- "thiserror",
- "tiktoken-rs",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -922,6 +895,33 @@ dependencies = [
  "serde",
  "similar",
  "tempfile",
+]
+
+[[package]]
+name = "interlock"
+version = "6.5.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "hex",
+ "http",
+ "insta",
+ "nix",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "subtle",
+ "thiserror",
+ "tiktoken-rs",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
