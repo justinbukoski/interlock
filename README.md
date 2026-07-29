@@ -72,8 +72,8 @@ See [`docs/OWNER_ADMINISTRATION.md`](docs/OWNER_ADMINISTRATION.md).
 
 ```sh
 python3 -m unittest discover -s distribution/tests
-cargo test --offline
-cargo clippy --offline --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 The ignored PostgreSQL integration test requires a disposable PostgreSQL 15+
