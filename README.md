@@ -1,5 +1,7 @@
 # Foreman Memory v6
 
+[![CI](https://github.com/justinbukoski63-star/foreman-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/justinbukoski63-star/foreman-memory/actions/workflows/ci.yml)
+
 Foreman is a self-hosted durable memory service for AI coding agents. It records
 conversation prompts automatically, retrieves relevant context with hybrid
 semantic search, and keeps raw history, candidate facts, canonical memory, and
