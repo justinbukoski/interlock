@@ -51,6 +51,16 @@ Automatic prompt capture is intentional and central to the product. Read
 [`docs/PRIVACY_AND_DATA.md`](docs/PRIVACY_AND_DATA.md) before enabling hooks so
 every user understands what is stored and how to export or erase it.
 
+## See the incident this design exists to prevent
+
+```
+python3 demo/stale_memory_demo.py
+```
+
+No dependencies. It reproduces the production failure that shaped Interlock:
+a stale fact out-ranking its own correction in similarity search, and the
+validity-filtering invariant that makes that outcome impossible.
+
 ## How retrieval works
 
 Agents normally retrieve memories through `interlock-mcp`, not through a remote
