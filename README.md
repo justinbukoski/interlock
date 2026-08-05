@@ -2,16 +2,33 @@
 
 [![CI](https://github.com/justinbukoski/interlock/actions/workflows/ci.yml/badge.svg)](https://github.com/justinbukoski/interlock/actions/workflows/ci.yml)
 
-**Interlock** (formerly Foreman Memory) is named for the machine-safety device
-that refuses to let equipment run unless the guard is in place. The same rule
-applies here: if the memory service is unreachable at session start, the agent
-halts instead of proceeding on fabricated context. Fail-closed is not a
-feature of this system; it is the thesis.
+**Interlock is a self-hosted memory service that multiple AI agents share — and cannot skip.** Every conversation prompt is captured, redacted, and embedded
+automatically; nobody has to say "remember this." Raw history, candidate
+facts, canonical memory, and short-lived handoffs live in separate lanes, and
+if the service is unreachable at session start, the agent halts instead of
+proceeding on fabricated context.
 
-Interlock is a self-hosted durable memory service for AI coding agents. It records
-conversation prompts automatically, retrieves relevant context with hybrid
-semantic search, and keeps raw history, candidate facts, canonical memory, and
-short-lived handoffs in separate lanes.
+What sets it apart from other agent-memory systems:
+
+- **One memory, many models.** Every agent gets its own scoped identity and
+  token, and every record carries actor and scope dimensions — so a Claude
+  session, a Codex session, and three local models can work the same project
+  against shared facts, directives, and handoffs. Handoffs use
+  compare-and-swap supersession: two agents can never both win one, and none
+  is silently lost. This is how teams of heterogeneous models collaborate on a
+  codebase instead of each keeping private notes.
+- **Capture is automatic and fail-closed.** Hooks record every prompt through
+  a durable, crash-recoverable spool that never silently discards an event.
+  Durable facts are extracted from what was actually said — not from what a
+  user remembered to dictate. If memory cannot be reached, the session does
+  not start. Fail-closed is not a feature of this system; it is the thesis.
+- **Corrections always win.** A validity-filtering invariant guarantees a
+  stale fact can never out-rank its own correction in retrieval. This is the
+  production failure that shaped the design — reproduce it with
+  `python3 demo/stale_memory_demo.py`.
+
+Interlock (formerly Foreman Memory) is named for the machine-safety interlock:
+the device that refuses to let equipment run unless the guard is in place.
 
 This friend release includes:
 
