@@ -162,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match archive.embed_pending(
                                 embedder.as_ref(),
                                 &worker_model,
-                                "chat-bge-large-en-v1.5-v1",
+                                interlock::archive::ARCHIVE_EMBEDDING_GENERATION,
                                 64,
                                 worker_id,
                             ).await {

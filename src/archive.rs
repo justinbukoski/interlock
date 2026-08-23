@@ -25,6 +25,13 @@ const MAX_BATCH: usize = 512;
 /// Hard ceiling on rows returned by a single search/export call.
 const MAX_PAGE: usize = 1000;
 
+/// The embedding generation the archive currently searches and embeds against.
+/// Search MUST filter its embeddings join to exactly this generation: the
+/// embeddings table is keyed (event_id, generation_id), so an unfiltered join
+/// duplicates every event and ranks against stale-generation vectors the day a
+/// second generation exists.
+pub const ARCHIVE_EMBEDDING_GENERATION: &str = "chat-bge-large-en-v1.5-v1";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArchiveActor {
@@ -729,7 +736,7 @@ impl ArchiveStore for PgArchiveStore {
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
             sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=1 AND success) AND NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE NOT success)",
+                "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version=3 AND success) AND NOT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE NOT success)",
             )
             .fetch_one(&self.pool),
         )
@@ -901,11 +908,12 @@ impl ArchiveStore for PgArchiveStore {
             .map(|embedding| vector_literal(&embedding.values))
             .transpose()?;
         let rows = sqlx::query(
-            r#"SELECT event_id,ingestion_seq,source_event_id,consumer_id,project_key,thread_id,
+            r#"SELECT archive_events.event_id,ingestion_seq,source_event_id,consumer_id,project_key,thread_id,
                       session_id,actor,event_kind,redacted_content,redaction_count,raw_content_ref,
                       source_timestamp,ingested_at
                FROM archive_events
-               LEFT JOIN archive_event_embeddings e USING(event_id)
+               LEFT JOIN archive_event_embeddings e
+                 ON e.event_id=archive_events.event_id AND e.generation_id=$12
                WHERE tenant_id=$1 AND user_id=$2 AND tombstoned_at IS NULL
                  AND ($3::uuid IS NULL OR consumer_id=$3)
                  AND ($4::text IS NULL OR project_key=$4)
@@ -935,6 +943,7 @@ impl ArchiveStore for PgArchiveStore {
         .bind(query)
         .bind(query_vector)
         .bind(limit)
+        .bind(ARCHIVE_EMBEDDING_GENERATION)
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(summary_from_row).collect()
@@ -1197,15 +1206,87 @@ impl ArchiveStore for PgArchiveStore {
             .execute(&mut *tx)
             .await?;
         }
-        // Step 3: raw payload purge. Raw payloads live behind an encrypted store
-        // outside this database; here we record that the archive-side reference
-        // was released. Crypto-erasure of the wrapped keys is a separate boundary.
+        // Step 3: raw payload purge. Raw payloads live behind an encrypted
+        // store outside this database keyed by raw_content_ref; releasing the
+        // reference is the archive-side purge, and it must actually happen —
+        // stamping raw_purged_at without clearing the references is exactly
+        // the "partial deletion mistaken for a complete one" this saga exists
+        // to prevent. Crypto-erasure of the wrapped keys is a separate
+        // boundary.
         if intent
             .get::<Option<DateTime<Utc>>, _>("raw_purged_at")
             .is_none()
         {
+            let released: i64 = if mode == "raw_only" {
+                // raw_only keeps redacted content live (no tombstones) and
+                // releases the raw references of every event the filter
+                // selects.
+                sqlx::query_scalar(
+                    r#"WITH released AS (
+                         UPDATE archive_events SET raw_content_ref=NULL
+                         WHERE tenant_id=$1 AND user_id=$2 AND raw_content_ref IS NOT NULL
+                           AND ($3::uuid IS NULL OR consumer_id=$3)
+                           AND ($4::text IS NULL OR project_key=$4)
+                           AND ($5::text IS NULL OR thread_id=$5)
+                           AND ($6::text IS NULL OR session_id=$6)
+                           AND ($7::timestamptz IS NULL OR source_timestamp>=$7)
+                           AND ($8::timestamptz IS NULL OR source_timestamp<=$8)
+                         RETURNING 1
+                       ) SELECT count(*) FROM released"#,
+                )
+                .bind(identity.tenant_id)
+                .bind(identity.user_id)
+                .bind(intent.get::<Option<Uuid>, _>("filter_consumer_id"))
+                .bind(intent.get::<Option<String>, _>("filter_project_key"))
+                .bind(intent.get::<Option<String>, _>("filter_thread_id"))
+                .bind(intent.get::<Option<String>, _>("filter_session_id"))
+                .bind(intent.get::<Option<DateTime<Utc>>, _>("filter_from"))
+                .bind(intent.get::<Option<DateTime<Utc>>, _>("filter_to"))
+                .fetch_one(&mut *tx)
+                .await?
+            } else {
+                // full mode releases the raw references of exactly the rows
+                // this intent tombstoned in step 2.
+                sqlx::query_scalar(
+                    r#"WITH released AS (
+                         UPDATE archive_events SET raw_content_ref=NULL
+                         WHERE tenant_id=$1 AND user_id=$2
+                           AND tombstone_intent_id=$3 AND raw_content_ref IS NOT NULL
+                         RETURNING 1
+                       ) SELECT count(*) FROM released"#,
+                )
+                .bind(identity.tenant_id)
+                .bind(identity.user_id)
+                .bind(intent_id)
+                .fetch_one(&mut *tx)
+                .await?
+            };
             sqlx::query(
                 "UPDATE deletion_intents SET raw_purged_at=clock_timestamp() WHERE intent_id=$1",
+            )
+            .bind(intent_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT INTO deletion_audit(tenant_id,user_id,intent_id,actor,step,detail) VALUES($1,$2,$3,$4,'raw_refs_released',$5)",
+            )
+            .bind(identity.tenant_id)
+            .bind(identity.user_id)
+            .bind(intent_id)
+            .bind(&identity.actor)
+            .bind(serde_json::json!({"raw_refs_released": released}))
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Completion: raw_only has no canonical-side steps, so once its
+        // archive-side steps are durable the intent is complete. full mode
+        // stays open until the canonical saga (derivative purge, candidate
+        // invalidation, orphan review) exists and runs — reported through
+        // pending_canonical_steps so a partial deletion is never mistaken for
+        // a complete one.
+        if mode == "raw_only" {
+            sqlx::query(
+                "UPDATE deletion_intents SET completed_at=COALESCE(completed_at,clock_timestamp()) WHERE intent_id=$1 AND raw_purged_at IS NOT NULL",
             )
             .bind(intent_id)
             .execute(&mut *tx)
@@ -1231,6 +1312,12 @@ impl ArchiveStore for PgArchiveStore {
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<ArchiveEvent>, AppError> {
+        // Mining reads cross every consumer's events for the user, so it is an
+        // owner-only surface like deletion — a scoped adapter or reader token
+        // must never see other consumers' raw history through this route.
+        if !identity.role.is_owner() {
+            return Err(AppError::Forbidden);
+        }
         if generation_id.trim().is_empty() || generation_id.len() > 256 {
             return Err(AppError::Invalid(
                 "generation_id must be 1..256 bytes".into(),
@@ -1273,6 +1360,11 @@ impl ArchiveStore for PgArchiveStore {
         generation_id: &str,
         through_ingestion_seq: i64,
     ) -> Result<(), AppError> {
+        // The cursor is monotonic and irreversible: advancing it permanently
+        // skips events for extraction. Owner-only, like every destructive op.
+        if !identity.role.is_owner() {
+            return Err(AppError::Forbidden);
+        }
         if generation_id.trim().is_empty() || generation_id.len() > 256 {
             return Err(AppError::Invalid(
                 "generation_id must be 1..256 bytes".into(),
@@ -1326,10 +1418,12 @@ impl ArchiveStore for PgArchiveStore {
                  count(*) FILTER (WHERE e.quarantined_at IS NOT NULL) AS quarantined
                FROM archive_event_embeddings e
                JOIN archive_events a USING(event_id)
-               WHERE a.tenant_id=$1 AND a.user_id=$2 AND a.tombstoned_at IS NULL"#,
+               WHERE a.tenant_id=$1 AND a.user_id=$2 AND a.tombstoned_at IS NULL
+                 AND e.generation_id=$3"#,
         )
         .bind(identity.tenant_id)
         .bind(identity.user_id)
+        .bind(ARCHIVE_EMBEDDING_GENERATION)
         .fetch_one(&self.pool)
         .await?;
         Ok(ArchiveHealth {

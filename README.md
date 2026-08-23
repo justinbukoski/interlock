@@ -17,8 +17,10 @@ What sets it apart from other agent-memory systems:
   compare-and-swap supersession: two agents can never both win one, and none
   is silently lost. This is how teams of heterogeneous models collaborate on a
   codebase instead of each keeping private notes.
-- **Capture is automatic and fail-closed.** Hooks record every prompt through
-  a durable, crash-recoverable spool that never silently discards an event.
+- **Capture is automatic and fail-closed.** Hooks record every prompt at the
+  start of the turn, and a durable, crash-recoverable capture queue
+  (`interlock-spool`) is available for adapters that must never silently
+  discard an event.
   Durable facts are extracted from what was actually said — not from what a
   user remembered to dictate. If memory cannot be reached, the session does
   not start. Fail-closed is not a feature of this system; it is the thesis.
@@ -36,7 +38,7 @@ This friend release includes:
 - BGE-large-en-v1.5 embeddings;
 - a Rust MCP adapter for bootstrap, recall, history, observation, memory writes,
   corrections, and handoffs;
-- fail-closed Codex and Claude Code hooks;
+- fail-closed hooks for Codex, Claude Code, and ZCode, plus an `.agents`-convention template;
 - a local Docker Compose installer with persistent identities and scoped tokens;
 - the 6.5 continuity plane: a typed handoff lifecycle with compare-and-swap
   supersession, so two agents can never both win a handoff and none is silently
@@ -61,8 +63,12 @@ cd interlock
 ```
 
 The service binds only to `127.0.0.1:8851`. Continue with
-[`docs/INSTALL_WITH_COWORK.md`](docs/INSTALL_WITH_COWORK.md) to connect Codex,
-Claude Code, or Claude Cowork and prove that the enforcement gate works.
+[`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md) — the complete
+implementation guide — to wire Claude Code, Codex, Claude Desktop/Cowork,
+ZCode, or any `.agents`-convention client, enforce the fail-closed gate, and
+verify the installation with positive and negative checks.
+[`docs/INSTALL_WITH_COWORK.md`](docs/INSTALL_WITH_COWORK.md) remains the
+guided AI-coworker variant of the same setup.
 
 Automatic prompt capture is intentional and central to the product. Read
 [`docs/PRIVACY_AND_DATA.md`](docs/PRIVACY_AND_DATA.md) before enabling hooks so
@@ -103,6 +109,7 @@ See [`docs/OWNER_ADMINISTRATION.md`](docs/OWNER_ADMINISTRATION.md).
 
 ## Operations
 
+- [Complete implementation guide](docs/IMPLEMENTATION.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Data model](docs/DATA_MODEL.md)
 - [Privacy and data controls](docs/PRIVACY_AND_DATA.md)

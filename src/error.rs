@@ -58,10 +58,19 @@ impl IntoResponse for AppError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", None)
             }
         };
-        let message = if matches!(self, Self::Storage(_)) {
-            "storage failure".to_owned()
-        } else {
-            self.to_string()
+        // Storage and Internal detail can carry SQL text, endpoint URLs, or
+        // serde context — server-side tracing keeps the detail; the HTTP body
+        // gets a constant.
+        let message = match &self {
+            Self::Storage(detail) => {
+                tracing::error!(%detail, "storage error");
+                "storage failure".to_owned()
+            }
+            Self::Internal(detail) => {
+                tracing::error!(%detail, "internal error");
+                "internal failure".to_owned()
+            }
+            _ => self.to_string(),
         };
         (
             status,

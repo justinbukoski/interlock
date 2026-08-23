@@ -555,7 +555,19 @@ async fn archive_search(
             if query.is_empty() {
                 None
             } else {
-                embedder.embed(query).await.ok()
+                // Redact before the query leaves the process for the embedder
+                // sidecar — same discipline as recall.
+                let (safe_query, _) = crate::redaction::redact(query);
+                match embedder.embed(&safe_query).await {
+                    Ok(embedding) => Some(embedding),
+                    Err(error) => {
+                        // Degrade to lexical-only, but never silently: recall
+                        // reports degradation in-band; archive search's shape
+                        // has no field for it yet, so the log is the signal.
+                        tracing::warn!(%error, "archive search degraded to lexical-only: query embedding unavailable");
+                        None
+                    }
+                }
             }
         } else {
             None

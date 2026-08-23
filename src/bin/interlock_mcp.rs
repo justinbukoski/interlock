@@ -15,7 +15,7 @@ const MAX_RESPONSE_BYTES: usize = 4_194_304;
 struct Config {
     base_url: Url,
     reader_token: String,
-    owner_token: String,
+    write_token: String,
 }
 
 impl Config {
@@ -27,14 +27,31 @@ impl Config {
             "INTERLOCK_READER_TOKEN_FILE",
             ".config/interlock/reader-token",
         )?;
-        let owner_path = configured_path(
-            "INTERLOCK_OWNER_TOKEN_FILE",
-            ".config/interlock/owner-token",
-        )?;
+        // Routine agents run with the WRITER credential (observations, normal
+        // memories, corrections, handoffs); the server's role checks stop a
+        // writer from minting owner-authority records. INTERLOCK_OWNER_TOKEN_FILE
+        // remains supported for a deliberate administrative session — see
+        // docs/OWNER_ADMINISTRATION.md. When both are set, writer wins.
+        let write_path = if std::env::var_os("INTERLOCK_WRITER_TOKEN_FILE").is_some() {
+            configured_path(
+                "INTERLOCK_WRITER_TOKEN_FILE",
+                ".config/interlock/writer-token",
+            )?
+        } else if std::env::var_os("INTERLOCK_OWNER_TOKEN_FILE").is_some() {
+            configured_path(
+                "INTERLOCK_OWNER_TOKEN_FILE",
+                ".config/interlock/owner-token",
+            )?
+        } else {
+            configured_path(
+                "INTERLOCK_WRITER_TOKEN_FILE",
+                ".config/interlock/writer-token",
+            )?
+        };
         Ok(Self {
             base_url,
             reader_token: read_secret(&reader_path)?,
-            owner_token: read_secret(&owner_path)?,
+            write_token: read_secret(&write_path)?,
         })
     }
 }
@@ -142,8 +159,8 @@ fn tools() -> Vec<Value> {
     vec![
         json!({
             "name": "bootstrap",
-            "description": "Load mandatory directives, scoped project state, and the latest exact-project handoff before acting.",
-            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"scope":scope,"token_budget":{"type":"integer","minimum":64,"maximum":32768,"default":4096}},"required":["token_budget"]},
+            "description": "Load mandatory directives, scoped project state, and the latest exact-project handoff before acting. The server enforces a dynamic minimum token_budget sized to the mandatory policy (currently ~11k); pass 16000.",
+            "inputSchema": {"type":"object","additionalProperties":false,"properties":{"scope":scope,"token_budget":{"type":"integer","minimum":64,"maximum":32768,"default":16000}},"required":["token_budget"]},
             "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
         }),
         json!({
@@ -270,7 +287,7 @@ fn handoff_write_schema() -> Value {
             "artifacts":{"type":"array","items":{"type":"string"}},
             "verification_state":{"type":["string","null"]},
             "do_not_repeat":{"type":"array","items":{"type":"string"}},
-            "expected_active_id":{"type":["string","null"],"format":"uuid"},
+            "expected_active_id":{"type":["string","null"],"format":"uuid"},"expect_no_active":{"type":"boolean","default":false,"description":"CAS guard for creation: the writer observed no active handoff. Conflicts if one exists. Mutually exclusive with expected_active_id. Always pass one of the two guards after reading state."},
             "source_snapshot_revision":{"type":["integer","null"]},
             "expires_at":{"type":["string","null"],"format":"date-time"}
         },
@@ -376,9 +393,9 @@ async fn call_tool(client: &Client, config: &Config, params: &Value) -> Result<V
                 .insert("intent".into(), json!("history"));
             ("/v6/recall", config.reader_token.as_str())
         }
-        "observe" => ("/v6/observations", config.owner_token.as_str()),
-        "remember" | "correct" => ("/v6/memories", config.owner_token.as_str()),
-        "handoff" => ("/v6/handoffs", config.owner_token.as_str()),
+        "observe" => ("/v6/observations", config.write_token.as_str()),
+        "remember" | "correct" => ("/v6/memories", config.write_token.as_str()),
+        "handoff" => ("/v6/handoffs", config.write_token.as_str()),
         "evidence" => ("/v6.5/archive/evidence", config.reader_token.as_str()),
         "archive_search" => ("/v6.5/archive/search", config.reader_token.as_str()),
         "handoff_get_exact" => ("/v6.5/handoff/get_exact", config.reader_token.as_str()),
@@ -387,10 +404,10 @@ async fn call_tool(client: &Client, config: &Config, params: &Value) -> Result<V
             config.reader_token.as_str(),
         ),
         "handoff_history" => ("/v6.5/handoff/history", config.reader_token.as_str()),
-        "handoff_write" => ("/v6.5/handoff/write", config.owner_token.as_str()),
-        "handoff_acknowledge" => ("/v6.5/handoff/acknowledge", config.owner_token.as_str()),
-        "handoff_complete_items" => ("/v6.5/handoff/complete_items", config.owner_token.as_str()),
-        "handoff_close" => ("/v6.5/handoff/close", config.owner_token.as_str()),
+        "handoff_write" => ("/v6.5/handoff/write", config.write_token.as_str()),
+        "handoff_acknowledge" => ("/v6.5/handoff/acknowledge", config.write_token.as_str()),
+        "handoff_complete_items" => ("/v6.5/handoff/complete_items", config.write_token.as_str()),
+        "handoff_close" => ("/v6.5/handoff/close", config.write_token.as_str()),
         _ => return Err(format!("unknown tool: {name}")),
     };
     call_api(client, config, path, token, arguments).await
@@ -516,7 +533,7 @@ mod tests {
     fn endpoint_requires_loopback() {
         assert!(loopback_url("http://127.0.0.1:8851").is_ok());
         assert!(loopback_url("http://[::1]:8851").is_ok());
-        assert!(loopback_url("http://192.168.1.10:8851").is_err());
+        assert!(loopback_url("http://203.0.113.10:8851").is_err());
         assert!(loopback_url("https://example.com").is_err());
         assert!(loopback_url("http://127.0.0.1:8851/path").is_err());
     }

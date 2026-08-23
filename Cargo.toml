@@ -1,6 +1,6 @@
 [package]
 name = "interlock-memory"
-version = "6.5.0"
+version = "6.5.1"
 edition = "2024"
 license = "MIT"
 description = "Fail-closed memory for AI coding agents: scoped recall, supersession semantics, durable capture, MCP."
@@ -20,11 +20,12 @@ path = "src/main.rs"
 async-trait = "0.1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
+csv = "1"
 hex = "0.4"
 http = "1"
 nix = { version = "0.30", features = ["user"] }
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

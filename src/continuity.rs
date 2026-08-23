@@ -64,27 +64,66 @@ pub struct ContextRef {
 }
 
 static HOME_LIKE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^/(home|users)/[^/]+/?$|^/root/?$").expect("static regex is valid")
+    // Rejects the home/user tree roots themselves — /home, /Users, /home/u,
+    // /Users/u, /root — while leaving deeper project paths legal.
+    Regex::new(r"(?i)^/(home|users)(/[^/]+)?$|^/root$").expect("static regex is valid")
 });
 static DRIVE_ROOT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z]:[\\/]?$").expect("static regex is valid"));
+    LazyLock::new(|| Regex::new(r"^[A-Za-z]:$").expect("static regex is valid"));
+static WINDOWS_HOME: LazyLock<Regex> = LazyLock::new(|| {
+    // C:\Users, C:\Users\justin, D:/home/u — the Windows home-tree roots.
+    Regex::new(r"(?i)^[a-z]:[\\/](users|home)([\\/][^\\/]+)?$").expect("static regex is valid")
+});
+
+/// Strips the decorations that let a broad key masquerade as a specific one:
+/// surrounding whitespace, then any run of trailing `/`, `\`, `/.`, `\.`.
+/// `/home/alice//`, `/home/alice/.`, and `~/` all normalize to their bare
+/// forms before the deny-list is consulted.
+fn normalize_context_key(key: &str) -> &str {
+    let mut current = key.trim();
+    loop {
+        let stripped = current
+            .strip_suffix("/.")
+            .or_else(|| current.strip_suffix("\\."))
+            .or_else(|| current.strip_suffix('/'))
+            .or_else(|| current.strip_suffix('\\'));
+        match stripped {
+            // Never strip a lone root down to the empty string — "/" must
+            // still be classified as a root, not as empty.
+            Some(rest) if !rest.is_empty() => current = rest,
+            _ => return current,
+        }
+    }
+}
 
 /// Returns a rejection reason when a context key is a forbidden broad location.
 /// Forbidden keys can never be used to write or retrieve a handoff, so a
 /// projectless task falling back to the home directory cannot surface an
-/// unrelated project's handoff (design §9.1 "forbidden automatic handoff keys").
+/// unrelated project's handoff (the "forbidden automatic handoff keys" rule).
 pub fn forbidden_context_reason(key: &str) -> Option<&'static str> {
-    let trimmed = key.trim();
-    if trimmed.is_empty() {
+    if key.trim().is_empty() {
         return Some("context key is empty");
     }
-    if matches!(trimmed, "/" | "\\" | "~" | "." | ".." | "*" | "-") {
+    let normalized = normalize_context_key(key);
+    if matches!(normalized, "/" | "\\" | "~" | "." | ".." | "*" | "-") {
         return Some("context key is a root or wildcard");
     }
-    if DRIVE_ROOT.is_match(trimmed) {
+    // Traversal segments can rewrite a deep-looking key into a broad one after
+    // the deny-list has run; reject them outright rather than resolving them.
+    if normalized.contains("/../")
+        || normalized.contains("\\..\\")
+        || normalized.ends_with("/..")
+        || normalized.ends_with("\\..")
+    {
+        return Some("context key contains a path traversal segment");
+    }
+    if DRIVE_ROOT.is_match(normalized) {
         return Some("context key is a drive root");
     }
-    if HOME_LIKE.is_match(trimmed) {
+    if HOME_LIKE.is_match(normalized) {
+        return Some("context key is a home or user root directory");
+    }
+    if WINDOWS_HOME.is_match(normalized) {
         return Some("context key is a home or user root directory");
     }
     None
@@ -138,6 +177,15 @@ pub struct HandoffWriteInput {
     /// present and stale, the write is rejected with the current active ID.
     #[serde(default)]
     pub expected_active_id: Option<Uuid>,
+    /// Compare-and-swap guard for the create-from-empty case: the writer
+    /// observed NO active handoff. If one exists at write time, the write is
+    /// rejected instead of silently superseding a concurrent creator.
+    /// Mutually exclusive with `expected_active_id`; omitting both keeps the
+    /// legacy unguarded-write semantics. Skipped from serialization when false
+    /// so the idempotency request_hash of legacy-shaped requests is unchanged
+    /// across the deploy boundary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expect_no_active: bool,
     #[serde(default)]
     pub source_snapshot_revision: Option<i64>,
     #[serde(default)]
@@ -386,9 +434,12 @@ fn validate_write(request: &HandoffWriteInput) -> Result<(), AppError> {
         return Err(AppError::Invalid("thread_id must be 1..512 bytes".into()));
     }
     for (name, items) in [
+        ("completed", &request.completed),
         ("in_progress", &request.in_progress),
         ("next_actions", &request.next_actions),
         ("blockers", &request.blockers),
+        ("artifacts", &request.artifacts),
+        ("do_not_repeat", &request.do_not_repeat),
     ] {
         if items.len() > MAX_ITEMS_PER_KIND {
             return Err(AppError::Invalid(format!(
@@ -404,6 +455,20 @@ fn validate_write(request: &HandoffWriteInput) -> Result<(), AppError> {
             )));
         }
     }
+    if request
+        .verification_state
+        .as_ref()
+        .is_some_and(|value| value.trim().is_empty() || value.len() > 8192)
+    {
+        return Err(AppError::Invalid(
+            "verification_state must be 1..8192 bytes".into(),
+        ));
+    }
+    if request.expect_no_active && request.expected_active_id.is_some() {
+        return Err(AppError::Invalid(
+            "expect_no_active and expected_active_id are mutually exclusive".into(),
+        ));
+    }
     if let Some(expires_at) = request.expires_at {
         let now = Utc::now();
         if expires_at <= now || expires_at > now + Duration::days(30) {
@@ -412,13 +477,18 @@ fn validate_write(request: &HandoffWriteInput) -> Result<(), AppError> {
             ));
         }
     }
-    // A handoff is continuation state, never a secret store.
+    // A handoff is continuation state, never a secret store. Every free-text
+    // field is scanned — completed/artifacts/verification_state included, so a
+    // credential can never ride into durable continuation state.
     let sensitive = [request.summary.as_str()]
         .into_iter()
+        .chain(request.completed.iter().map(String::as_str))
         .chain(request.in_progress.iter().map(String::as_str))
         .chain(request.next_actions.iter().map(String::as_str))
         .chain(request.blockers.iter().map(String::as_str))
+        .chain(request.artifacts.iter().map(String::as_str))
         .chain(request.do_not_repeat.iter().map(String::as_str))
+        .chain(request.verification_state.as_deref())
         .any(crate::redaction::contains_sensitive_text);
     if sensitive {
         return Err(AppError::Invalid(
@@ -567,10 +637,30 @@ impl ContinuityStore for PgContinuityStore {
         .await?;
         let context_id: Uuid = context.get("context_id");
         let current_active: Option<Uuid> = context.get("active_handoff_id");
-        // Compare-and-swap: reject a write whose observed active pointer is stale.
-        if let Some(expected) = request.expected_active_id
-            && Some(expected) != current_active
-        {
+        // The pointer can reference an expired handoff (nothing transitions
+        // expiry eagerly), and get_exact filters expiry — so a writer that
+        // observed "no active handoff" must be compared against the EFFECTIVE
+        // active (active status AND unexpired), or every guarded write on an
+        // abandoned context would conflict forever.
+        let effective_active: Option<Uuid> = match current_active {
+            Some(active_id) => sqlx::query_scalar(
+                "SELECT handoff_id FROM continuity.handoffs WHERE handoff_id=$1 AND status='active' AND expires_at>clock_timestamp()",
+            )
+            .bind(active_id)
+            .fetch_optional(&mut *tx)
+            .await?,
+            None => None,
+        };
+        // Compare-and-swap: reject a write whose observed active pointer is
+        // stale. `expect_no_active` guards the create-from-empty race — the
+        // common multi-agent case — where both writers observed an empty
+        // context and neither may silently supersede the other.
+        let cas_violated = match (request.expect_no_active, request.expected_active_id) {
+            (true, _) => effective_active.is_some(),
+            (false, Some(expected)) => Some(expected) != current_active,
+            (false, None) => false,
+        };
+        if cas_violated {
             let conflict = HandoffConflict {
                 current_active_id: current_active,
                 reason: "active handoff changed since it was read".into(),
@@ -888,11 +978,25 @@ mod tests {
         for key in [
             "/",
             "~",
-            "/home/justin",
-            "/Users/justin/",
+            "~/",
+            "/home",
+            "/home/",
+            "/home/alice",
+            "/home/alice//",
+            "/home/alice/.",
+            "/Users",
+            "/Users/",
+            "/Users/alice/",
             "/root",
+            "/root/",
             "C:\\",
+            "C:/",
+            "C:\\Users",
+            "C:\\Users\\alice",
+            "D:/home/alice",
+            "c:\\users\\alice\\",
             "",
+            "   ",
         ] {
             assert!(
                 forbidden_context_reason(key).is_some(),
@@ -904,10 +1008,13 @@ mod tests {
     #[test]
     fn legitimate_typed_keys_are_allowed() {
         for key in [
-            "git:github.com/justin/interlock@main",
+            "git:github.com/alice/interlock@main",
             "durable-project:interlock-v6",
             "thread:codex-01H8X...",
-            "/home/justin/Projects/interlock-v6", // deeper than a home root
+            "/home/alice/Projects/interlock-v6", // deeper than a home root
+            "/home/alice/Projects/interlock-v6/", // trailing separator variant
+            "C:\\Users\\alice\\Projects\\interlock-v6", // deeper Windows path
+            "/var/lib/interlock",
         ] {
             assert!(
                 forbidden_context_reason(key).is_none(),

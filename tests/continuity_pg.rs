@@ -49,6 +49,7 @@ fn write_input(context: ContextRef, summary: &str, expected: Option<Uuid>) -> Ha
         verification_state: None,
         do_not_repeat: vec![],
         expected_active_id: expected,
+        expect_no_active: false,
         source_snapshot_revision: None,
         expires_at: None,
     }
@@ -157,6 +158,49 @@ async fn concurrent_supersession_has_exactly_one_winner() {
     let active = store.get_exact(&id, &context(&key)).await.unwrap().unwrap();
     assert_ne!(active.handoff_id, first.handoff_id);
     assert_eq!(active.predecessor_handoff_id, Some(first.handoff_id));
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing at disposable PostgreSQL with pgvector"]
+async fn concurrent_creation_has_exactly_one_winner() {
+    // The create-from-empty race: both writers observed NO active handoff.
+    // With expect_no_active, exactly one may create; the other conflicts.
+    let store = store().await;
+    let id = identity(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let key = format!("git:test/create-{}@main", Uuid::new_v4());
+
+    fn guarded(context: ContextRef, summary: &str) -> HandoffWriteInput {
+        let mut input = write_input(context, summary, None);
+        input.expect_no_active = true;
+        input
+    }
+
+    let (s1, s2) = (store.clone(), store.clone());
+    let (id1, id2) = (id.clone(), id.clone());
+    let (k1, k2) = (key.clone(), key.clone());
+    let (r1, r2) = tokio::join!(
+        tokio::spawn(async move { s1.write(&id1, &guarded(context(&k1), "c-a")).await }),
+        tokio::spawn(async move { s2.write(&id2, &guarded(context(&k2), "c-b")).await }),
+    );
+    let results = [r1.unwrap(), r2.unwrap()];
+    let winners = results.iter().filter(|r| r.is_ok()).count();
+    let conflicts = results
+        .iter()
+        .filter(|r| matches!(r, Err(AppError::Conflict(_))))
+        .count();
+    assert_eq!(winners, 1, "exactly one creator may win an empty context");
+    assert_eq!(
+        conflicts, 1,
+        "the losing creator receives a conflict, not a silent supersession"
+    );
+
+    // Guard misuse is rejected outright.
+    let mut both = write_input(context(&key), "both-guards", Some(Uuid::new_v4()));
+    both.expect_no_active = true;
+    assert!(matches!(
+        store.write(&id, &both).await,
+        Err(AppError::Invalid(_))
+    ));
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 [features]
 hooks = true
 
-[mcp_servers.interlock-v6]
+[mcp_servers.interlock]
 enabled = true
 required = true
 command = "/ABSOLUTE/HOME/.local/bin/interlock-mcp"

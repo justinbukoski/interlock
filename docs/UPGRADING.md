@@ -12,7 +12,12 @@ git pull --ff-only
 curl -fsS http://127.0.0.1:8851/v6/health
 ```
 
-The installer reuses existing tokens and stable identities. It rebuilds the
+The installer reuses existing tokens and stable identities. Upgrading to
+6.5.1 applies archive migration `0003` and renames token files to
+`reader-token`/`writer-token`/`owner-token`, keeping the old `v6-` prefixed
+names as synchronized regular-file copies (the MCP adapter refuses symlinked
+token files); update configurations to the new names at your convenience.
+See `CHANGELOG.md` and `docs/IMPLEMENTATION.md` §7. It rebuilds the
 containers, applies forward database migrations, and rebuilds the MCP adapter.
 Upgrading from v6.0.0 provisions the new conversation-archive database and its
 generated password automatically; existing data is unaffected.

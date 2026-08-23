@@ -107,7 +107,7 @@ services:
     ports:
       - "127.0.0.1:${INTERLOCK_PORT:-8851}:8851"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/interlock-healthcheck", "--http", "127.0.0.1:8851", "/v6/health"]
+      test: ["CMD", "/usr/local/bin/interlock-healthcheck", "--http", "127.0.0.1:8851", "/v6.5/health", "--expect", "\"status\":\"ok\""]
       interval: 10s
       timeout: 5s
       retries: 20

@@ -16,12 +16,28 @@ for command in cargo docker git openssl python3; do
 done
 docker compose version >/dev/null
 
-reader_file="$config_dir/v6-reader-token"
-writer_file="$config_dir/v6-writer-token"
-owner_file="$config_dir/v6-owner-token"
-[[ -f "$reader_file" ]] || openssl rand -hex 32 >"$reader_file"
-[[ -f "$writer_file" ]] || openssl rand -hex 32 >"$writer_file"
-[[ -f "$owner_file" ]] || openssl rand -hex 32 >"$owner_file"
+# Token files use the same names as the client defaults and the integration
+# templates. Installs from 6.5.0, which provisioned v6-prefixed names, are
+# migrated by COPY (not symlink — the adapter deliberately opens token files
+# with O_NOFOLLOW and rejects symlinks), so configurations referencing either
+# name keep working. The v6-prefixed names are deprecated; rotate via
+# docs/UPGRADING.md, which refreshes both copies.
+reader_file="$config_dir/reader-token"
+writer_file="$config_dir/writer-token"
+owner_file="$config_dir/owner-token"
+for name in reader writer owner; do
+  new_file="$config_dir/$name-token"
+  old_file="$config_dir/v6-$name-token"
+  if [[ ! -e "$new_file" && -f "$old_file" && ! -L "$old_file" ]]; then
+    cp -p "$old_file" "$new_file"
+  fi
+  [[ -f "$new_file" ]] || openssl rand -hex 32 >"$new_file"
+  # Keep a deprecated-name copy in sync so pre-6.5.1 configurations work.
+  if [[ -f "$old_file" && ! -L "$old_file" ]]; then
+    cp -p "$new_file" "$old_file"
+    chmod 0600 "$old_file"
+  fi
+done
 chmod 0600 "$reader_file" "$writer_file" "$owner_file"
 
 env_file="$dist/.env"

@@ -36,5 +36,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !status.windows(5).any(|part| part == b" 200 ") {
         return Err("unhealthy response".into());
     }
+    // Optional body requirement: `--expect <substring>` after the path. Used
+    // to gate on /v6.5/health, which reports HTTP 200 with "status":"degraded"
+    // while the archive schema is behind — a 200 alone is not readiness.
+    if let Some(flag) = args.next() {
+        if flag != "--expect" {
+            return Err("unknown healthcheck argument".into());
+        }
+        let needle = args.next().ok_or("--expect requires a value")?;
+        if !response
+            .windows(needle.len().max(1))
+            .any(|part| part == needle.as_bytes())
+        {
+            return Err("response body missing expected content".into());
+        }
+    }
     Ok(())
 }

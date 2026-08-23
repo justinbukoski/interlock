@@ -142,7 +142,7 @@ fn enqueue(config: &Config) -> Result<u8, String> {
                 Ok(EXIT_BLOCK_HOST)
             }
             Level::B => {
-                record_gap(config, &event)?;
+                record_gap(config, &event, "spool_capacity_exhausted")?;
                 eprintln!(
                     "{}",
                     json!({"status":"spool_full","level":"B","action":"gap_recorded"})
@@ -156,13 +156,13 @@ fn enqueue(config: &Config) -> Result<u8, String> {
 
 /// Append a durable gap marker recording that an event could not be captured.
 /// This is the Level B honesty guarantee: the hole in history is itself recorded.
-fn record_gap(config: &Config, event: &Value) -> Result<(), String> {
+fn record_gap(config: &Config, event: &Value, reason: &str) -> Result<(), String> {
     let marker = json!({
         "gap": true,
         "source_event_id": event.get("source_event_id"),
         "consumer_id": event.get("consumer_id"),
         "thread_id": event.get("thread_id"),
-        "reason": "spool_capacity_exhausted",
+        "reason": reason,
     });
     let mut options = std::fs::OpenOptions::new();
     options.create(true).append(true);
@@ -231,9 +231,48 @@ fn flush(config: &Config) -> Result<u8, String> {
             .map(|record| serde_json::from_slice::<Value>(&record.payload))
             .collect::<Result<_, _>>()
             .map_err(|_| "spooled payload is not valid JSON")?;
-        post_batch(&client, &base, &token, &events)?;
+        let response = post_batch(&client, &base, &token, &events)?;
+        // A 2xx batch can still carry per-event rejections. An event the
+        // archive refused must never vanish silently between the spool ack and
+        // nothing: record each rejection as a durable gap marker BEFORE the
+        // ack removes the event from the spool.
+        let acks = response
+            .get("acks")
+            .and_then(Value::as_array)
+            .ok_or("archive response is missing acks")?;
+        if acks.len() != events.len() {
+            return Err(format!(
+                "archive returned {} acknowledgements for {} events",
+                acks.len(),
+                events.len()
+            ));
+        }
+        let mut rejected = 0u64;
+        for (ack, event) in acks.iter().zip(events.iter()) {
+            let status = ack.get("status").and_then(Value::as_str).unwrap_or("");
+            match status {
+                "accepted" | "already_present" => {}
+                "rejected" => {
+                    let reason = ack
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unspecified");
+                    record_gap(config, event, &format!("archive_rejected: {reason}"))?;
+                    rejected += 1;
+                }
+                other => {
+                    return Err(format!("archive returned unknown ack status {other:?}"));
+                }
+            }
+        }
         spool.ack(last).map_err(|error| error.to_string())?;
-        delivered += pending.len() as u64;
+        delivered += pending.len() as u64 - rejected;
+        if rejected > 0 {
+            eprintln!(
+                "{}",
+                json!({"status":"rejected_events_gap_logged","count":rejected})
+            );
+        }
     }
     println!("{}", json!({"status": "flushed", "delivered": delivered}));
     Ok(EXIT_OK)
@@ -256,7 +295,7 @@ fn post_batch(
     base: &url_lite::Url,
     token: &str,
     events: &[Value],
-) -> Result<(), String> {
+) -> Result<Value, String> {
     use std::io::{BufRead, BufReader};
     use std::net::TcpStream;
     let body = json!({"events": events}).to_string();
@@ -288,10 +327,27 @@ fn post_batch(
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
         .ok_or("malformed archive response")?;
+    // Drain headers, then the body (Connection: close, so read to EOF). The
+    // body carries per-event acknowledgements a 2xx status alone cannot: a
+    // batch can be 200 with individual rejections.
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|_| "cannot read archive response headers")?;
+        if read == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+    }
+    let mut body = Vec::new();
+    reader
+        .read_to_end(&mut body)
+        .map_err(|_| "cannot read archive response body")?;
     if !(200..300).contains(&code) {
         return Err(format!("archive ingestion returned HTTP {code}"));
     }
-    Ok(())
+    serde_json::from_slice(&body).map_err(|_| "archive response body is not valid JSON".into())
 }
 
 fn loopback_url(input: &str) -> Result<url_lite::Url, String> {

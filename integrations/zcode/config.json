@@ -1,0 +1,43 @@
+{
+  "mcp": {
+    "servers": {
+      "interlock": {
+        "command": "/ABSOLUTE/HOME/.local/bin/interlock-mcp",
+        "args": [],
+        "env": {
+          "INTERLOCK_URL": "http://127.0.0.1:8851",
+          "INTERLOCK_READER_TOKEN_FILE": "/ABSOLUTE/HOME/.config/interlock/reader-token",
+          "INTERLOCK_WRITER_TOKEN_FILE": "/ABSOLUTE/HOME/.config/interlock/writer-token"
+        }
+      }
+    }
+  },
+  "hooks": {
+    "enabled": true,
+    "events": {
+      "SessionStart": [
+        {
+          "matcher": "startup|clear|compact",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "\"$HOME/.local/bin/interlock-gate\"",
+              "timeoutMs": 15000
+            }
+          ]
+        }
+      ],
+      "UserPromptSubmit": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "\"$HOME/.local/bin/interlock-gate\"",
+              "timeoutMs": 15000
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

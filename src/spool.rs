@@ -168,6 +168,11 @@ pub struct Spool {
     /// sentinels store a bounded delta from this base so a 32-bit marker cannot
     /// overflow at large absolute sequence numbers.
     file_base: u64,
+    /// End offset of the last durable frame. Writes always land here — never at
+    /// `SeekFrom::End` — so garbage left by a failed write can never end up in
+    /// front of a later successful frame, where recovery's torn-tail truncation
+    /// would silently discard the acknowledged later frame.
+    logical_end: u64,
 }
 
 impl Spool {
@@ -187,6 +192,10 @@ impl Spool {
         if len == 0 {
             write_header(&mut file)?;
             file.sync_all()?;
+            // A freshly created file is durable only once its directory entry
+            // is — without this, power loss can drop the whole spool file even
+            // though every append inside it was fsynced.
+            sync_parent_dir(&path)?;
             return Ok(Self {
                 path,
                 file,
@@ -197,6 +206,7 @@ impl Spool {
                 pending_bytes: 0,
                 consumed_through: 0,
                 file_base: 0,
+                logical_end: HEADER_LEN,
             });
         }
         Self::recover(path, file, capacity, len)
@@ -244,11 +254,21 @@ impl Spool {
                 truncate_to = offset;
                 continue;
             }
-            if payload_len > MAX_RECORD_BYTES {
-                // Torn or corrupt tail; stop and truncate here.
-                break;
-            }
             let frame_end = offset + FRAME_PREFIX_LEN as u64 + payload_len as u64;
+            if payload_len > MAX_RECORD_BYTES {
+                if frame_end > len {
+                    // Garbage length at the physical tail: an interrupted
+                    // append. Truncate.
+                    break;
+                }
+                // An impossible length with more file after it is corruption,
+                // not a torn write. Truncating here would silently discard
+                // every durable, possibly acknowledged frame that follows —
+                // fail closed and leave the file for operator recovery.
+                return Err(SpoolError::Corrupt(
+                    "corrupt frame length before end of spool; refusing to truncate durable records",
+                ));
+            }
             if frame_end > len {
                 break; // partial payload from an interrupted append
             }
@@ -258,7 +278,15 @@ impl Spool {
                 break;
             }
             if crc32(&buf) != expected_crc {
-                break; // torn payload; discard from here on
+                if frame_end == len {
+                    break; // torn payload at the physical tail; truncate
+                }
+                // A checksum failure mid-file with durable frames after it is
+                // bit rot, not a torn write — fail closed instead of silently
+                // discarding everything that follows.
+                return Err(SpoolError::Corrupt(
+                    "frame checksum failure before end of spool; refusing to truncate durable records",
+                ));
             }
             frames.push(Frame {
                 sequence,
@@ -291,6 +319,7 @@ impl Spool {
             pending_bytes,
             consumed_through,
             file_base: base_sequence,
+            logical_end: truncate_to,
         })
     }
 
@@ -312,15 +341,18 @@ impl Spool {
                 max_bytes: self.capacity.max_bytes,
             });
         }
-        let offset = self.file.seek(SeekFrom::End(0))?;
+        let offset = self.logical_end;
         let mut prefix = [0u8; FRAME_PREFIX_LEN];
         prefix[0..4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
         prefix[4..8].copy_from_slice(&crc32(payload).to_le_bytes());
-        self.file.write_all(&prefix)?;
-        self.file.write_all(payload)?;
-        // Flush-before-acknowledge: the caller must not treat this event as
-        // captured until the bytes are on stable storage.
-        self.file.sync_all()?;
+        if let Err(error) = self.write_frame_at(offset, &prefix, payload) {
+            // Repair the torn tail immediately: truncate back to the last
+            // durable frame so a later successful append cannot land after
+            // garbage and be discarded by recovery. This event itself fails
+            // closed to the caller.
+            self.repair_tail();
+            return Err(error);
+        }
         let sequence = self.next_sequence;
         self.frames.push(Frame {
             sequence,
@@ -329,7 +361,36 @@ impl Spool {
         });
         self.next_sequence += 1;
         self.pending_bytes += payload.len() as u64;
+        self.logical_end = offset + FRAME_PREFIX_LEN as u64 + payload.len() as u64;
         Ok(sequence)
+    }
+
+    /// Write prefix+payload at `offset` and fsync; used by append and the
+    /// consumed sentinel so both share the torn-tail repair discipline.
+    fn write_frame_at(
+        &mut self,
+        offset: u64,
+        prefix: &[u8; FRAME_PREFIX_LEN],
+        payload: &[u8],
+    ) -> Result<(), SpoolError> {
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.write_all(prefix)?;
+        if !payload.is_empty() {
+            self.file.write_all(payload)?;
+        }
+        // Flush-before-acknowledge: the caller must not treat this event as
+        // captured until the bytes are on stable storage.
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    /// Best-effort truncation back to the last durable frame after a failed
+    /// write. If the truncation itself fails the next `open` still recovers via
+    /// torn-tail truncation — but only frames before the garbage, which is why
+    /// this is attempted eagerly here.
+    fn repair_tail(&mut self) {
+        let _ = self.file.set_len(self.logical_end);
+        let _ = self.file.sync_all();
     }
 
     /// The undelivered records, oldest first, up to `limit`.
@@ -399,9 +460,12 @@ impl Spool {
         let delta = self.consumed_through.saturating_sub(self.file_base);
         let marker = u32::try_from(delta).unwrap_or(u32::MAX);
         prefix[4..8].copy_from_slice(&marker.to_le_bytes());
-        self.file.seek(SeekFrom::End(0))?;
-        self.file.write_all(&prefix)?;
-        self.file.sync_all()?;
+        let offset = self.logical_end;
+        if let Err(error) = self.write_frame_at(offset, &prefix, &[]) {
+            self.repair_tail();
+            return Err(error);
+        }
+        self.logical_end = offset + FRAME_PREFIX_LEN as u64;
         Ok(())
     }
 
@@ -454,6 +518,7 @@ impl Spool {
         self.pending_bytes = payloads.iter().map(|payload| payload.len() as u64).sum();
         self.consumed_through = base_sequence;
         self.file_base = base_sequence;
+        self.logical_end = offset;
         Ok(())
     }
 

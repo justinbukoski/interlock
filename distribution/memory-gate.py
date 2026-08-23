@@ -65,11 +65,27 @@ def main() -> int:
         if session_id:
             scope["thread_id"] = session_id
             scope["session_id"] = session_id
-        bootstrap = request(
-            "/v6/bootstrap",
-            token,
-            {"scope": scope, "token_budget": 4096},
-        )
+        try:
+            bootstrap = request(
+                "/v6/bootstrap",
+                token,
+                {"scope": scope, "token_budget": 16000},
+            )
+        except urllib.error.HTTPError as error:
+            # The server enforces a dynamic minimum budget sized to the
+            # mandatory policy. Retry once at the stated minimum rather than
+            # blocking every session the day the policy outgrows the default.
+            if error.code != 422:
+                raise
+            detail = json.loads(error.read().decode("utf-8", "replace"))
+            minimum = (detail.get("error") or {}).get("minimum_token_budget")
+            if not isinstance(minimum, int):
+                raise
+            bootstrap = request(
+                "/v6/bootstrap",
+                token,
+                {"scope": scope, "token_budget": min(max(minimum, 16000), 32768)},
+            )
         prompt = event.get("prompt")
         if event.get("hook_event_name") == "UserPromptSubmit" and isinstance(prompt, str) and prompt.strip():
             writer_path = pathlib.Path(

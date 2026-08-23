@@ -6,6 +6,7 @@
 
 use interlock::{
     Identity, PgArchiveStore, TokenRole,
+    error::AppError,
     archive::{
         ArchiveActor, ArchiveEventInput, ArchiveEventKind, ArchiveExportRequest,
         ArchiveIngestRequest, ArchiveSearchRequest, ArchiveStore, DeletionMode, DeletionRequest,
@@ -113,12 +114,20 @@ async fn ingestion_is_idempotent_and_detects_content_drift() {
 #[ignore = "requires TEST_ARCHIVE_DATABASE_URL pointing at disposable PostgreSQL"]
 async fn mining_cursor_advances_in_ingestion_order_over_late_events() {
     let store = store().await;
-    let writer = identity(
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        Uuid::new_v4(),
-        TokenRole::Writer,
-    );
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let writer = identity(tenant, user, Uuid::new_v4(), TokenRole::Writer);
+    // Mining is an owner-only surface: it crosses consumers and its cursor is
+    // irreversible.
+    let owner = identity(tenant, user, Uuid::new_v4(), TokenRole::Owner);
+    assert!(matches!(
+        store.mining_pending(&writer, "gen-denied", 10).await,
+        Err(AppError::Forbidden)
+    ));
+    assert!(matches!(
+        store.advance_cursor(&writer, "gen-denied", 1).await,
+        Err(AppError::Forbidden)
+    ));
     let generation = format!("gen-{}", Uuid::new_v4());
     // Ingest a recent event first.
     let recent = format!("recent-{}", Uuid::new_v4());
@@ -132,18 +141,18 @@ async fn mining_cursor_advances_in_ingestion_order_over_late_events() {
         .await
         .unwrap();
     let pending = store
-        .mining_pending(&writer, &generation, 100)
+        .mining_pending(&owner, &generation, 100)
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
     let first_seq = pending[0].ingestion_seq;
     store
-        .advance_cursor(&writer, &generation, first_seq)
+        .advance_cursor(&owner, &generation, first_seq)
         .await
         .unwrap();
     assert!(
         store
-            .mining_pending(&writer, &generation, 100)
+            .mining_pending(&owner, &generation, 100)
             .await
             .unwrap()
             .is_empty()
@@ -163,7 +172,7 @@ async fn mining_cursor_advances_in_ingestion_order_over_late_events() {
         .await
         .unwrap();
     let after = store
-        .mining_pending(&writer, &generation, 100)
+        .mining_pending(&owner, &generation, 100)
         .await
         .unwrap();
     assert_eq!(
