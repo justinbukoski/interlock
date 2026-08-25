@@ -6,12 +6,12 @@
 
 use interlock::{
     Identity, PgArchiveStore, TokenRole,
-    error::AppError,
     archive::{
         ArchiveActor, ArchiveEventInput, ArchiveEventKind, ArchiveExportRequest,
         ArchiveIngestRequest, ArchiveSearchRequest, ArchiveStore, DeletionMode, DeletionRequest,
         IngestStatus,
     },
+    error::AppError,
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;

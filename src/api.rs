@@ -140,6 +140,11 @@ async fn readiness(State(state): State<AppState>) -> Result<Json<serde_json::Val
     ))
 }
 
+/// Interactive query embedding is bounded well inside interlock-mcp's 20s request
+/// timeout so a slow embedder degrades recall to lexical instead of killing the
+/// caller's connection. Batch embedding keeps its own, longer budget.
+const INTERACTIVE_EMBED_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn validate_budget(budget: usize) -> Result<(), AppError> {
     if !(64..=32_768).contains(&budget) {
         return Err(AppError::Invalid(
@@ -204,11 +209,22 @@ async fn recall(
         (None, None)
     } else if let Some(embedder) = &state.embedder {
         let (safe_query, _) = crate::redaction::redact(query);
-        match embedder.embed(&safe_query).await {
-            Ok(embedding) => (Some(embedding), None),
-            Err(error) => {
+        // The embedder's own client allows 30s, but interlock-mcp gives the whole
+        // request 20s. Without a shorter deadline here an embedder stall kills the
+        // agent's call before this handler ever gets to degrade gracefully — the
+        // caller sees a dead connection instead of a lexical-only answer.
+        match tokio::time::timeout(INTERACTIVE_EMBED_DEADLINE, embedder.embed(&safe_query)).await {
+            Ok(Ok(embedding)) => (Some(embedding), None),
+            Ok(Err(error)) => {
                 tracing::warn!(%error, "semantic recall degraded to lexical retrieval");
                 (None, Some("query_embedding_unavailable".into()))
+            }
+            Err(_) => {
+                tracing::warn!(
+                    deadline_ms = INTERACTIVE_EMBED_DEADLINE.as_millis(),
+                    "query embedding exceeded interactive deadline; lexical retrieval only"
+                );
+                (None, Some("query_embedding_timeout".into()))
             }
         }
     } else {
@@ -549,29 +565,30 @@ async fn archive_search(
     Extension(identity): Extension<Identity>,
     Json(request): Json<ArchiveSearchRequest>,
 ) -> Result<Json<Vec<crate::archive::ArchiveEventSummary>>, AppError> {
-    let query_embedding =
-        if let (Some(embedder), Some(query)) = (&state.embedder, request.query.as_deref()) {
-            let query = query.trim();
-            if query.is_empty() {
-                None
-            } else {
-                // Redact before the query leaves the process for the embedder
-                // sidecar — same discipline as recall.
-                let (safe_query, _) = crate::redaction::redact(query);
-                match embedder.embed(&safe_query).await {
-                    Ok(embedding) => Some(embedding),
-                    Err(error) => {
-                        // Degrade to lexical-only, but never silently: recall
-                        // reports degradation in-band; archive search's shape
-                        // has no field for it yet, so the log is the signal.
-                        tracing::warn!(%error, "archive search degraded to lexical-only: query embedding unavailable");
-                        None
-                    }
+    let query_embedding = if let (Some(embedder), Some(query)) =
+        (&state.embedder, request.query.as_deref())
+    {
+        let query = query.trim();
+        if query.is_empty() {
+            None
+        } else {
+            // Redact before the query leaves the process for the embedder
+            // sidecar — same discipline as recall.
+            let (safe_query, _) = crate::redaction::redact(query);
+            match embedder.embed(&safe_query).await {
+                Ok(embedding) => Some(embedding),
+                Err(error) => {
+                    // Degrade to lexical-only, but never silently: recall
+                    // reports degradation in-band; archive search's shape
+                    // has no field for it yet, so the log is the signal.
+                    tracing::warn!(%error, "archive search degraded to lexical-only: query embedding unavailable");
+                    None
                 }
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
     Ok(Json(
         state
             .archive()?

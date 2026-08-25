@@ -37,6 +37,7 @@ struct FakeStore {
     recalled: Vec<MemoryItem>,
     project: Vec<MemoryItem>,
     handoff: Option<Handoff>,
+    recall_error: Option<fn() -> AppError>,
 }
 
 #[async_trait]
@@ -53,6 +54,9 @@ impl MemoryStore for FakeStore {
         _: RecallIntent,
         _: usize,
     ) -> Result<Vec<MemoryItem>, AppError> {
+        if let Some(make_error) = self.recall_error {
+            return Err(make_error());
+        }
         Ok(self.recalled.clone())
     }
     async fn mandatory(
@@ -676,4 +680,39 @@ async fn combined_health_reports_configured_planes() {
     )
     .await;
     assert_eq!(without["archive_configured"], false);
+}
+
+/// A statement timeout must not present as a retryable transaction conflict.
+/// The old mapping sent SQLSTATE 57014 out as 503 "retryable", which invited
+/// callers to retry a query that could never finish in time.
+#[tokio::test]
+async fn query_timeout_is_a_gateway_timeout_not_a_retryable_conflict() {
+    let store = FakeStore {
+        recall_error: Some(|| AppError::QueryTimeout),
+        ..Default::default()
+    };
+    let response = app(store)
+        .oneshot(post(
+            "/v6/recall",
+            json!({"query":"x","token_budget":16000}),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        response.headers().get("retry-after").is_none(),
+        "a query timeout must not advertise a retry window"
+    );
+    let body = json_body(response).await;
+    assert_eq!(body.pointer("/error/code"), Some(&json!("query_timeout")));
+    assert_eq!(
+        body.pointer("/error/message"),
+        Some(&json!("database query exceeded its execution deadline"))
+    );
+    let message = body.pointer("/error/message").unwrap().to_string();
+    assert!(
+        !message.contains("conflict") && !message.contains("retry"),
+        "message must not suggest a transaction conflict or a retry: {message}"
+    );
 }

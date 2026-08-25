@@ -698,6 +698,84 @@ const ITEM_SELECT: &str = r#"
    AND (s.session_id IS NULL OR s.session_id=$7)
 "#;
 
+/// Query B of recall: authorization, scope, precedence, RRF fusion and late
+/// payload hydration over an ANN candidate seed produced by Query A.
+///
+/// $1 tenant_id, $2 user_id, $3 consumer_id, $4 project_key, $5 repository_key,
+/// $6 thread_id, $7 session_id, $8 query text, $9 output limit, $10 RRF lane
+/// depth, $11 ANN candidate ids, $12 ANN candidate distances.
+///
+/// The precedence window runs over a narrow projection; `rendered`, the object
+/// JSON and the source columns are joined back only for the rows that survive
+/// selection. Carrying them (and the 1024-dimension vectors) through the window
+/// sort is what spilled ~43MB of temp blocks per call in the previous shape.
+///
+/// With empty $11/$12 the semantic lane is empty and this degrades to
+/// lexical-only retrieval, which is the correct behaviour when no query
+/// embedding is available.
+const RECALL_SQL: &str = r#"
+WITH ranked_applicable AS MATERIALIZED (
+  SELECT p.id,p.subject_key,pr.key AS predicate_key,p.cardinality,p.object_hash,
+         p.search_document,s.specificity,(s.consumer_id IS NOT NULL) AS consumer_specific,
+         p.authority_rank,p.recorded_at,
+         row_number() OVER (
+           PARTITION BY p.subject_key,pr.key,
+             CASE WHEN p.cardinality='set' THEN encode(p.object_hash,'hex') ELSE '' END
+           ORDER BY s.specificity DESC,(s.consumer_id IS NOT NULL) DESC,
+                    p.authority_rank ASC,p.recorded_at DESC,p.id ASC
+         ) AS precedence
+  FROM propositions p
+  JOIN predicates pr ON pr.id=p.predicate_id
+  JOIN scopes s ON s.id=p.scope_id
+  WHERE s.tenant_id=$1 AND s.user_id=$2
+    AND (s.consumer_id IS NULL OR s.consumer_id=$3)
+    AND p.status='current' AND p.valid_to IS NULL
+    AND (s.project_key IS NULL OR s.project_key=$4)
+    AND (s.repository_key IS NULL OR s.repository_key=$5)
+    AND (s.thread_id IS NULL OR s.thread_id=$6)
+    AND (s.session_id IS NULL OR s.session_id=$7)
+), winners AS MATERIALIZED (
+  SELECT * FROM ranked_applicable WHERE precedence=1
+), lexical_matches AS (
+  SELECT id,ts_rank_cd(search_document,websearch_to_tsquery('english',$8)) AS score
+  FROM winners
+  WHERE search_document @@ websearch_to_tsquery('english',$8)
+     OR subject_key ILIKE '%'||$8||'%' OR predicate_key ILIKE '%'||$8||'%'
+), lexical AS (
+  SELECT id,row_number() OVER (ORDER BY score DESC,id) AS rank
+  FROM lexical_matches ORDER BY score DESC,id LIMIT $10
+), semantic_seed AS MATERIALIZED (
+  SELECT seed.id,seed.distance
+  FROM unnest($11::uuid[],$12::float8[]) AS seed(id,distance)
+), semantic AS (
+  -- Joining to winners re-applies identity, scope, status and precedence: a row
+  -- the ANN seed found but the caller may not see cannot survive this join.
+  SELECT s.id,row_number() OVER (ORDER BY s.distance,s.id) AS rank
+  FROM semantic_seed s JOIN winners w USING (id)
+  ORDER BY s.distance,s.id LIMIT $10
+), fused AS (
+  SELECT id,sum(score) AS relevance FROM (
+    SELECT id,1.0/(60+rank) AS score FROM lexical
+    UNION ALL SELECT id,1.0/(60+rank) AS score FROM semantic
+  ) lanes GROUP BY id
+), selected AS MATERIALIZED (
+  SELECT w.id,w.specificity,w.consumer_specific,w.authority_rank,w.recorded_at,f.relevance
+  FROM winners w JOIN fused f USING (id)
+  ORDER BY w.specificity DESC,w.consumer_specific DESC,w.authority_rank ASC,
+           f.relevance DESC,w.recorded_at DESC,w.id ASC
+  LIMIT $9
+)
+SELECT p.id,p.subject_key,pr.key AS predicate_key,p.cardinality,p.object_hash,
+       p.object_value,p.rendered,p.authority,p.epistemic_status,s.scope_level,
+       p.source_type,p.source_ref,p.valid_from,p.valid_to,p.recorded_at,p.status
+FROM selected x
+JOIN propositions p ON p.id=x.id
+JOIN predicates pr ON pr.id=p.predicate_id
+JOIN scopes s ON s.id=p.scope_id
+ORDER BY x.specificity DESC,x.consumer_specific DESC,x.authority_rank ASC,
+         x.relevance DESC,x.recorded_at DESC,x.id ASC
+"#;
+
 pub(crate) fn vector_literal(values: &[f32]) -> Result<String, AppError> {
     if values.len() != 1024 || values.iter().any(|value| !value.is_finite()) {
         return Err(AppError::Invalid(
@@ -798,69 +876,103 @@ impl MemoryStore for PgMemoryStore {
             .map(|embedding| vector_literal(&embedding.values))
             .transpose()?;
         let embedding_model = query_embedding.map(|embedding| embedding.model.as_str());
-        let sql = if vector.is_some() {
-            format!(
-                r#"WITH base_raw AS ({ITEM_SELECT}), ranked_base AS (
-            SELECT *,row_number() OVER (
-              PARTITION BY subject_key,predicate_key,
-                CASE WHEN cardinality='set' THEN encode(object_hash,'hex') ELSE '' END
-              ORDER BY specificity DESC,consumer_specific DESC,authority_rank ASC,recorded_at DESC,id ASC
-            ) AS precedence FROM base_raw
-          ), base AS (SELECT * FROM ranked_base WHERE precedence=1),
-          lexical AS (
-            SELECT id,row_number() OVER (ORDER BY ts_rank_cd(search_document,websearch_to_tsquery('english',$8)) DESC,id) AS rank
-            FROM base WHERE search_document @@ websearch_to_tsquery('english',$8)
-              OR subject_key ILIKE '%'||$8||'%' OR predicate_key ILIKE '%'||$8||'%'
-            ORDER BY rank LIMIT $11 * 8
-          ), semantic AS (
-            SELECT id,row_number() OVER (ORDER BY embedding <=> $9::vector,id) AS rank
-            FROM base WHERE embedding IS NOT NULL AND embedding_model=$10
-            ORDER BY embedding <=> $9::vector,id LIMIT $11 * 8
-          ), fused AS (
-            SELECT id,sum(score) AS relevance FROM (
-              SELECT id,1.0/(60+rank) AS score FROM lexical
-              UNION ALL SELECT id,1.0/(60+rank) AS score FROM semantic
-            ) lanes GROUP BY id
-          ), applicable AS (
-            SELECT base.*,fused.relevance FROM base JOIN fused USING(id)
-          )
-            SELECT id,subject_key,predicate_key,cardinality,object_hash,object_value,rendered,
-            authority,epistemic_status,scope_level,source_type,source_ref,valid_from,valid_to,recorded_at,status
-          FROM applicable
-          ORDER BY specificity DESC,consumer_specific DESC,authority_rank ASC,relevance DESC,recorded_at DESC,id ASC
-          LIMIT $11"#
-            )
-        } else {
-            format!(
-                r#"WITH applicable AS (
-            {ITEM_SELECT} AND (p.search_document @@ websearch_to_tsquery('english',$8)
-              OR p.subject_key ILIKE '%'||$8||'%' OR pr.key ILIKE '%'||$8||'%')
-          ), ranked AS (
-            SELECT *,row_number() OVER (
-              PARTITION BY subject_key,predicate_key,
-                CASE WHEN cardinality='set' THEN encode(object_hash,'hex') ELSE '' END
-              ORDER BY specificity DESC,consumer_specific DESC,authority_rank ASC,recorded_at DESC,id ASC
-            ) AS precedence FROM applicable
-          ) SELECT id,subject_key,predicate_key,cardinality,object_hash,object_value,rendered,
-            authority,epistemic_status,scope_level,source_type,source_ref,valid_from,valid_to,recorded_at,status
-          FROM ranked WHERE precedence=1
-          ORDER BY specificity DESC,consumer_specific DESC,authority_rank ASC,recorded_at DESC,id ASC LIMIT $11"#
-            )
+
+        // Recall runs in one read-only transaction with two statements.
+        //
+        // Query A seeds approximate-nearest-neighbour candidates directly from
+        // proposition_embeddings so the HNSW index is reachable. Query B applies
+        // identity/scope/status filtering, precedence, RRF fusion and hydrates the
+        // payload only for selected rows.
+        //
+        // Before this shape the semantic lane ranked over a materialized CTE, which
+        // put the vector comparison beyond any base-table index: every recall
+        // evaluated all embeddings, spilled ~43MB of temp blocks, and blew the 5s
+        // statement_timeout under load. PostgreSQL reported that cancellation as
+        // SQLSTATE 57014, which the error layer mislabelled as a retry-able
+        // transaction conflict.
+        let mut tx = self.pool.begin().await?;
+        for statement in [
+            "SET LOCAL lock_timeout='2s'",
+            "SET LOCAL statement_timeout='5s'",
+            "SET LOCAL idle_in_transaction_session_timeout='10s'",
+            "SET LOCAL hnsw.iterative_scan='strict_order'",
+        ] {
+            sqlx::query(statement).execute(&mut *tx).await?;
+        }
+
+        // RRF lane depth, unchanged from the previous query.
+        let lane_target = limit.saturating_mul(8);
+        // ANN over-fetch is a separate concern from lane depth: scope, consumer,
+        // status and precedence rejection all happen after the seed, so no fixed
+        // multiple of `limit` can guarantee a full semantic lane.
+        let mut ann_seed = std::cmp::max(256, lane_target.saturating_mul(4));
+        // Matches hnsw.max_scan_tuples; past this the lane is genuinely exhausted.
+        const ANN_SEED_CAP: usize = 20_000;
+
+        let mut seed_ids: Vec<Uuid> = Vec::new();
+        let mut seed_distances: Vec<f64> = Vec::new();
+
+        let rows = loop {
+            if let (Some(vector), Some(model)) = (vector.as_deref(), embedding_model) {
+                // The planner costs the sequential scan marginally cheaper than the
+                // HNSW scan on this corpus (2951 vs 2471..3141 at seed 160), so it
+                // picks the brute-force plan unless told otherwise. Scoped to this
+                // statement only: Query B still needs sequential scans.
+                sqlx::query("SET LOCAL enable_seqscan=off")
+                    .execute(&mut *tx)
+                    .await?;
+                let seed_rows = sqlx::query(
+                    r#"SELECT pe.proposition_id AS id, pe.embedding <=> $3::vector AS distance
+                       FROM proposition_embeddings pe
+                       WHERE pe.embedding IS NOT NULL
+                         AND pe.tenant_id=$1 AND pe.user_id=$2
+                         AND pe.embedding_model=$4
+                       ORDER BY pe.embedding <=> $3::vector
+                       LIMIT $5"#,
+                )
+                .bind(identity.tenant_id)
+                .bind(identity.user_id)
+                .bind(vector)
+                .bind(model)
+                .bind(ann_seed as i64)
+                .fetch_all(&mut *tx)
+                .await?;
+                sqlx::query("SET LOCAL enable_seqscan=on")
+                    .execute(&mut *tx)
+                    .await?;
+
+                seed_ids = seed_rows.iter().map(|row| row.get("id")).collect();
+                seed_distances = seed_rows.iter().map(|row| row.get("distance")).collect();
+            }
+
+            let rows = sqlx::query(RECALL_SQL)
+                .bind(identity.tenant_id)
+                .bind(identity.user_id)
+                .bind(identity.consumer_id)
+                .bind(&scope.project_key)
+                .bind(&scope.repository_key)
+                .bind(&scope.thread_id)
+                .bind(&scope.session_id)
+                .bind(query)
+                .bind(limit as i64)
+                .bind(lane_target as i64)
+                .bind(&seed_ids)
+                .bind(&seed_distances)
+                .fetch_all(&mut *tx)
+                .await?;
+
+            // Only expand when the seed was actually exhausted — a short seed means
+            // the index ran out of neighbours, not that filtering was aggressive.
+            let seed_exhausted = seed_ids.len() == ann_seed;
+            let underfilled = rows.len() < limit;
+            if vector.is_some() && underfilled && seed_exhausted && ann_seed < ANN_SEED_CAP {
+                ann_seed = std::cmp::min(ann_seed.saturating_mul(2), ANN_SEED_CAP);
+                continue;
+            }
+            break rows;
         };
-        let rows = sqlx::query(&sql)
-            .bind(identity.tenant_id)
-            .bind(identity.user_id)
-            .bind(identity.consumer_id)
-            .bind(&scope.project_key)
-            .bind(&scope.repository_key)
-            .bind(&scope.thread_id)
-            .bind(&scope.session_id)
-            .bind(query)
-            .bind(vector)
-            .bind(embedding_model)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await?;
+
+        tx.commit().await?;
         rows.into_iter().map(row_to_item).collect()
     }
 

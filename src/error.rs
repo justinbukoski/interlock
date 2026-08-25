@@ -16,6 +16,8 @@ pub enum AppError {
     Conflict(String),
     #[error("retryable transaction conflict")]
     Retryable,
+    #[error("database query exceeded its execution deadline")]
+    QueryTimeout,
     #[error("{0} is not configured on this deployment")]
     Unavailable(&'static str),
     #[error("not found")]
@@ -52,6 +54,11 @@ impl IntoResponse for AppError {
             ),
             Self::Conflict(_) => (StatusCode::CONFLICT, "conflict", None),
             Self::Retryable => (StatusCode::SERVICE_UNAVAILABLE, "retryable", None),
+            // 57014 is query_canceled. Reporting it as a transaction conflict told
+            // callers to retry something a retry cannot fix; two agents burned a
+            // session on that. 504 with no Retry-After says "this was too slow",
+            // which is the actionable truth.
+            Self::QueryTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_timeout", None),
             Self::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable", None),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", None),
             Self::Storage(_) | Self::Internal(_) => {
@@ -91,9 +98,21 @@ impl From<sqlx::Error> for AppError {
         if value
             .as_database_error()
             .and_then(|error| error.code())
-            .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01" | "55P03" | "57014"))
+            .is_some_and(|code| matches!(code.as_ref(), "40001" | "40P01" | "55P03"))
         {
             Self::Retryable
+        } else if value
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| code.as_ref() == "57014")
+        {
+            // query_canceled covers statement_timeout and explicit backend
+            // cancellation. The client gets a constant; the operator needs the
+            // database's own message to tell those apart.
+            if let Some(detail) = value.as_database_error() {
+                tracing::warn!(detail = %detail.message(), "database query canceled");
+            }
+            Self::QueryTimeout
         } else {
             Self::Storage(value)
         }
