@@ -1150,3 +1150,98 @@ async fn ann_seed_cannot_smuggle_forbidden_or_shadowed_rows_into_recall() {
         "the entitled, precedence-winning row must still be returned: {joined}"
     );
 }
+
+/// The outbox had an INSERT and no consumer anywhere in the codebase, so it grew
+/// one row per canonical write from 2026-04-09 onward and reached 36,224 rows.
+/// This proves the drain claims and completes work, is idempotent across repeat
+/// runs, and that retention only removes rows that were actually finished.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing at disposable PostgreSQL with pgvector 0.8.2+"]
+async fn outbox_drains_completes_and_prunes_only_finished_events() {
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let store = PgMemoryStore::new(pool.clone());
+    store.migrate().await.unwrap();
+    let owner = identity(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let scope = ScopeSelector {
+        project_key: Some(format!("git:test/outbox-{}", Uuid::new_v4())),
+        ..Default::default()
+    };
+
+    for n in 0..3 {
+        store
+            .remember(
+                &owner,
+                &write(
+                    Uuid::new_v4(),
+                    scope.clone(),
+                    &format!("outbox seed {n}"),
+                    Authority::OwnerInstruction,
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let pending_before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE completed_at IS NULL AND tenant_id=$1",
+    )
+    .bind(owner.tenant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        pending_before >= 3,
+        "each canonical write should enqueue an event"
+    );
+
+    let drained = store.drain_outbox(512, Uuid::new_v4()).await.unwrap();
+    assert!(drained >= 3, "drain must claim and complete the backlog");
+
+    let pending_after: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM outbox WHERE completed_at IS NULL AND tenant_id=$1",
+    )
+    .bind(owner.tenant_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pending_after, 0,
+        "nothing of ours should remain outstanding"
+    );
+
+    // Draining again must not resurrect completed work or double-count it.
+    let second = store.drain_outbox(512, Uuid::new_v4()).await.unwrap();
+    assert_eq!(second, 0, "a completed outbox must drain to nothing");
+
+    // Retention keeps recent completions; ours were completed seconds ago.
+    let deleted = store.prune_outbox(7).await.unwrap();
+    let survivors: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox WHERE tenant_id=$1")
+        .bind(owner.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(
+        survivors >= 3,
+        "a 7-day window must not delete work completed moments ago (deleted {deleted})"
+    );
+
+    // Age ours past the window and confirm retention then collects them.
+    sqlx::query(
+        "UPDATE outbox SET completed_at = clock_timestamp() - interval '30 days' WHERE tenant_id=$1",
+    )
+    .bind(owner.tenant_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    store.prune_outbox(7).await.unwrap();
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM outbox WHERE tenant_id=$1")
+        .bind(owner.tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0, "aged, completed events must be collected");
+}

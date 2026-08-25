@@ -102,6 +102,107 @@ impl PgMemoryStore {
             .map_err(|error| AppError::Internal(error.to_string()))
     }
 
+    /// Drain outbox events.
+    ///
+    /// The outbox was written to from the first canonical write and never read —
+    /// no claimant, no completion, no retention anywhere in the codebase — so it
+    /// grew one row per write forever. docs/DATA_MODEL.md always specified a work
+    /// queue claimed with FOR UPDATE SKIP LOCKED; this is the missing consumer,
+    /// not a change of meaning.
+    ///
+    /// `canonical_changed` is currently the only event type. Snapshot revision is
+    /// already bumped inside the writing transaction and no cache consumer exists
+    /// yet, so the handler validates that the referenced proposition is really
+    /// there and marks the event done. An unrecognised event type is deliberately
+    /// left unclaimed rather than completed: silently discarding an event nobody
+    /// has written a handler for is how a queue lies about being empty.
+    pub async fn drain_outbox(&self, batch_size: i64, _worker_id: Uuid) -> Result<usize, AppError> {
+        let limit = batch_size.clamp(1, 512);
+        let mut tx = self.pool.begin().await?;
+        Self::configure_write_transaction(&mut tx).await?;
+        let claimed = sqlx::query(
+            "UPDATE outbox SET claimed_at=clock_timestamp(),attempts=attempts+1
+             WHERE id IN (
+               SELECT id FROM outbox
+               WHERE completed_at IS NULL
+                 AND (claimed_at IS NULL OR claimed_at < clock_timestamp() - interval '5 minutes')
+               ORDER BY created_at,id
+               FOR UPDATE SKIP LOCKED
+               LIMIT $1
+             )
+             RETURNING id,event_type,tenant_id,user_id,aggregate_id",
+        )
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        if claimed.is_empty() {
+            tx.commit().await?;
+            return Ok(0);
+        }
+        let mut handled: Vec<Uuid> = Vec::with_capacity(claimed.len());
+        let mut unknown = 0usize;
+        for row in &claimed {
+            let event_type: String = row.get("event_type");
+            match event_type.as_str() {
+                "canonical_changed" => {
+                    // The aggregate is a foreign key, so this is a consistency
+                    // assertion rather than a lookup that is expected to miss.
+                    let exists: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM propositions WHERE tenant_id=$1 AND user_id=$2 AND id=$3)",
+                    )
+                    .bind(row.get::<Uuid, _>("tenant_id"))
+                    .bind(row.get::<Uuid, _>("user_id"))
+                    .bind(row.get::<Uuid, _>("aggregate_id"))
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    if exists {
+                        handled.push(row.get("id"));
+                    } else {
+                        tracing::warn!(
+                            event_id = %row.get::<Uuid, _>("id"),
+                            "outbox event references a missing proposition; leaving it for review"
+                        );
+                    }
+                }
+                other => {
+                    unknown += 1;
+                    tracing::warn!(
+                        event_type = other,
+                        "no outbox handler; leaving event unclaimed"
+                    );
+                }
+            }
+        }
+        if !handled.is_empty() {
+            sqlx::query("UPDATE outbox SET completed_at=clock_timestamp() WHERE id = ANY($1)")
+                .bind(&handled)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        if unknown > 0 {
+            tracing::warn!(unknown, "outbox events without a handler");
+        }
+        Ok(handled.len())
+    }
+
+    /// Delete completed outbox events older than the retention window.
+    ///
+    /// The audit trail lives in `audit_events`, which is append-only and is not
+    /// touched here. A completed outbox row is a delivered work item, not a
+    /// record of what happened.
+    pub async fn prune_outbox(&self, retain_days: i64) -> Result<u64, AppError> {
+        let days = retain_days.clamp(1, 365);
+        let deleted = sqlx::query(&format!(
+            "DELETE FROM outbox WHERE completed_at IS NOT NULL
+             AND completed_at < clock_timestamp() - interval '{days} days'"
+        ))
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(deleted)
+    }
+
     /// Best-effort derived-data worker. A failed embedding leaves the row eligible
     /// for a later retry and never rolls back an acknowledged canonical write.
     pub async fn embed_pending(

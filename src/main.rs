@@ -177,6 +177,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         embedding_worker = Some((worker_id, handle));
     }
+    // Outbox drain. Deliberately independent of the embedding worker above: the
+    // outbox has nothing to do with embeddings, and gating it on an embedder
+    // being configured is how it would quietly stop draining again.
+    let outbox_worker = {
+        let worker_store = store.clone();
+        let worker_id = uuid::Uuid::new_v4();
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            let mut since_prune = 0u32;
+            loop {
+                tokio::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() { break; }
+                    }
+                    _ = interval.tick() => {
+                        match worker_store.drain_outbox(256, worker_id).await {
+                            Ok(count) if count > 0 => tracing::info!(count, "drained outbox events"),
+                            Ok(_) => {}
+                            Err(error) => tracing::warn!(%error, "outbox drain will retry"),
+                        }
+                        // Roughly hourly at a 5s tick.
+                        since_prune += 1;
+                        if since_prune >= 720 {
+                            since_prune = 0;
+                            match worker_store.prune_outbox(7).await {
+                                Ok(deleted) if deleted > 0 => tracing::info!(deleted, "pruned completed outbox events"),
+                                Ok(_) => {}
+                                Err(error) => tracing::warn!(%error, "outbox prune will retry"),
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    };
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!(address = %config.listen, trusted_proxy = config.trusted_proxy, "Interlock listening");
     let shutdown_notifier = shutdown_tx.clone();
@@ -198,6 +234,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         store.release_embedding_leases(worker_id).await?;
         if let Some(archive) = &archive_store {
             archive.release_embedding_leases(worker_id).await?;
+        }
+    }
+    {
+        let mut handle = outbox_worker;
+        if tokio::time::timeout(Duration::from_secs(10), &mut handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+            let _ = handle.await;
         }
     }
     server_result?;
