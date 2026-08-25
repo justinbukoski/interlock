@@ -108,11 +108,11 @@ async fn derived_embeddings_enable_semantic_only_recall() {
         .await
         .unwrap();
     assert_eq!(
-        recalled.len(),
+        recalled.items.len(),
         1,
         "semantic lane must retrieve without a lexical match"
     );
-    assert_eq!(recalled[0].object, json!({"value":"semantic needle"}));
+    assert_eq!(recalled.items[0].object, json!({"value":"semantic needle"}));
     assert_eq!(count(&pool, "SELECT count(*) FROM proposition_embeddings WHERE tenant_id=$1 AND embedding IS NOT NULL AND embedding_model='test-bge'", owner.tenant_id).await, 1);
     assert_eq!(count(&pool, "SELECT count(*) FROM observation_embeddings WHERE tenant_id=$1 AND embedding IS NOT NULL AND embedding_model='test-bge'", owner.tenant_id).await, 1);
 
@@ -328,6 +328,7 @@ async fn postgres_migration_supersession_scope_and_lane_invariants() {
         )
         .await
         .unwrap();
+    let history = history.items;
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].authority, Authority::RawHistory);
     assert_eq!(history[0].state, "history");
@@ -501,6 +502,7 @@ async fn postgres_migration_supersession_scope_and_lane_invariants() {
             )
             .await
             .unwrap()
+            .items
             .is_empty(),
         "history is consumer-scoped and must not leak across consumers"
     );
@@ -721,11 +723,14 @@ async fn postgres_migration_supersession_scope_and_lane_invariants() {
         .await
         .unwrap();
     assert_eq!(
-        recalled.len(),
+        recalled.items.len(),
         1,
         "broader project value must be structurally shadowed"
     );
-    assert_eq!(recalled[0].object, json!({"value":"repository-current"}));
+    assert_eq!(
+        recalled.items[0].object,
+        json!({"value":"repository-current"})
+    );
 
     let directive = MemoryWriteRequest {
         request_id: Uuid::new_v4(),
@@ -789,7 +794,12 @@ async fn postgres_migration_supersession_scope_and_lane_invariants() {
         )
         .await
         .unwrap();
-    assert!(history.iter().all(|item| !item.rendered.contains(&marker)));
+    assert!(
+        history
+            .items
+            .iter()
+            .all(|item| !item.rendered.contains(&marker))
+    );
 
     let other_tenant = Uuid::new_v4();
     let cross_tenant = sqlx::query(
@@ -944,4 +954,199 @@ async fn populated_v1_schema_upgrades_to_observation_candidate_lifecycle() {
         .execute(&mut *connection)
         .await
         .unwrap();
+}
+
+/// The ANN seed must reach the HNSW index. If the vector comparison is ever moved
+/// back over a materialized CTE the index becomes unreachable, every recall
+/// degrades to a full scan of the embedding table, and production starts timing
+/// out again — which is exactly how the 2026-08-24 outage happened.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing at disposable PostgreSQL with pgvector 0.8.2+"]
+async fn ann_seed_uses_the_hnsw_index_and_not_a_sequential_scan() {
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let store = PgMemoryStore::new(pool.clone());
+    store.migrate().await.unwrap();
+    let owner = identity(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let scope = ScopeSelector {
+        project_key: Some(format!("git:test/plan-{}", Uuid::new_v4())),
+        ..Default::default()
+    };
+    for index in 0..8 {
+        store
+            .remember(
+                &owner,
+                &write(
+                    Uuid::new_v4(),
+                    scope.clone(),
+                    &format!("plan probe {index}"),
+                    Authority::OwnerInstruction,
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .embed_pending(&StaticEmbedder, "test-bge", 64, Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let probe = StaticEmbedder.embed("plan probe").await.unwrap();
+    let literal = format!(
+        "[{}]",
+        probe
+            .values
+            .iter()
+            .map(f32::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("SET LOCAL hnsw.iterative_scan='strict_order'")
+        .execute(&mut *connection)
+        .await
+        .ok();
+    sqlx::query("SET enable_seqscan=off")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let plan: Vec<String> = sqlx::query(
+        r#"EXPLAIN SELECT pe.proposition_id, pe.embedding <=> $3::vector AS distance
+           FROM proposition_embeddings pe
+           WHERE pe.embedding IS NOT NULL
+             AND pe.tenant_id=$1 AND pe.user_id=$2
+             AND pe.embedding_model='test-bge'
+           ORDER BY pe.embedding <=> $3::vector
+           LIMIT 64"#,
+    )
+    .bind(owner.tenant_id)
+    .bind(owner.user_id)
+    .bind(&literal)
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| row.get::<String, _>(0))
+    .collect();
+    let plan = plan.join("\n");
+
+    assert!(
+        plan.contains("proposition_embeddings_hnsw_idx"),
+        "ANN seed must be servable by the HNSW index; plan was:\n{plan}"
+    );
+    assert!(
+        !plan.contains("Seq Scan on proposition_embeddings"),
+        "ANN seed must not fall back to a sequential scan; plan was:\n{plan}"
+    );
+}
+
+/// Query A is only a hint. Everything the caller is not entitled to see, and
+/// everything precedence rules out, must still be rejected by Query B — even
+/// when the ANN seed ranks it first.
+///
+/// StaticEmbedder gives every row the same vector, so every row is an equally
+/// near neighbour and the seed contains all of them. Nothing but the filtering
+/// and precedence logic stands between a forbidden row and the response.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing at disposable PostgreSQL with pgvector 0.8.2+"]
+async fn ann_seed_cannot_smuggle_forbidden_or_shadowed_rows_into_recall() {
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let store = PgMemoryStore::new(pool.clone());
+    store.migrate().await.unwrap();
+
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let owner = identity(tenant, user, Uuid::new_v4());
+    let other_tenant = identity(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let project = format!("git:test/adversarial-{}", Uuid::new_v4());
+    let project_scope = ScopeSelector {
+        project_key: Some(project.clone()),
+        ..Default::default()
+    };
+    let global_scope = ScopeSelector::default();
+
+    // Shadowed: same canonical key at global scope, beaten by the project-scoped
+    // row on specificity.
+    store
+        .remember(
+            &owner,
+            &write(
+                Uuid::new_v4(),
+                global_scope.clone(),
+                "shadowed-broader-value",
+                Authority::OwnerInstruction,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .remember(
+            &owner,
+            &write(
+                Uuid::new_v4(),
+                project_scope.clone(),
+                "winning-specific-value",
+                Authority::OwnerInstruction,
+            ),
+        )
+        .await
+        .unwrap();
+    // Another tenant entirely: must never be a candidate.
+    store
+        .remember(
+            &other_tenant,
+            &write(
+                Uuid::new_v4(),
+                project_scope.clone(),
+                "cross-tenant-secret",
+                Authority::OwnerInstruction,
+            ),
+        )
+        .await
+        .unwrap();
+    store
+        .embed_pending(&StaticEmbedder, "test-bge", 64, Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let probe = StaticEmbedder.embed("anything").await.unwrap();
+    let outcome = store
+        .recall(
+            &owner,
+            &project_scope,
+            "lexically-absent-zzyzx",
+            Some(&probe),
+            RecallIntent::Current,
+            50,
+        )
+        .await
+        .unwrap();
+
+    let rendered: Vec<String> = outcome
+        .items
+        .iter()
+        .map(|item| item.object.to_string())
+        .collect();
+    let joined = rendered.join(" | ");
+    assert!(
+        !joined.contains("cross-tenant-secret"),
+        "another tenant's row reached recall through the ANN seed: {joined}"
+    );
+    assert!(
+        !joined.contains("shadowed-broader-value"),
+        "a precedence-losing row reached recall through the ANN seed: {joined}"
+    );
+    assert!(
+        joined.contains("winning-specific-value"),
+        "the entitled, precedence-winning row must still be returned: {joined}"
+    );
 }

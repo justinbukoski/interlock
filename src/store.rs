@@ -16,6 +16,21 @@ use sqlx::{PgPool, Row};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+/// Recall result plus the state of the semantic lane that produced it.
+///
+/// The retrieval contract requires degraded lane state to be visible: a caller
+/// must be able to tell "hybrid retrieval worked" from "the ANN scan cap was
+/// reached and the semantic lane is short or empty". Returning only the items
+/// made those two indistinguishable.
+#[derive(Debug, Default)]
+pub struct RecallOutcome {
+    pub items: Vec<MemoryItem>,
+    /// How many candidates survived filtering and precedence into the lane.
+    pub semantic_count: usize,
+    /// The seed hit ANN_SEED_CAP with the lane still short of its target.
+    pub semantic_exhausted: bool,
+}
+
 #[async_trait]
 pub trait MemoryStore: Send + Sync {
     async fn ready(&self) -> Result<(), AppError>;
@@ -27,7 +42,7 @@ pub trait MemoryStore: Send + Sync {
         query_embedding: Option<&Embedding>,
         intent: RecallIntent,
         limit: usize,
-    ) -> Result<Vec<MemoryItem>, AppError>;
+    ) -> Result<RecallOutcome, AppError>;
     async fn mandatory(
         &self,
         identity: &Identity,
@@ -825,7 +840,7 @@ impl MemoryStore for PgMemoryStore {
         query_embedding: Option<&Embedding>,
         intent: RecallIntent,
         limit: usize,
-    ) -> Result<Vec<MemoryItem>, AppError> {
+    ) -> Result<RecallOutcome, AppError> {
         if intent == RecallIntent::History {
             let rows = sqlx::query(
                 r#"SELECT o.id,o.source_event_id,o.event_kind,o.observed_at,o.redacted_content,
@@ -851,7 +866,7 @@ impl MemoryStore for PgMemoryStore {
             .bind(limit as i64)
             .fetch_all(&self.pool)
             .await?;
-            return rows
+            let items: Result<Vec<MemoryItem>, AppError> = rows
                 .into_iter()
                 .map(|row| {
                     let observed_at = row.get("observed_at");
@@ -880,6 +895,11 @@ impl MemoryStore for PgMemoryStore {
                     })
                 })
                 .collect();
+            return Ok(RecallOutcome {
+                items: items?,
+                semantic_count: 0,
+                semantic_exhausted: false,
+            });
         }
         let vector = query_embedding
             .map(|embedding| vector_literal(&embedding.values))
@@ -1001,17 +1021,30 @@ impl MemoryStore for PgMemoryStore {
                     ann_seed = std::cmp::min(ann_seed.saturating_mul(2), ANN_SEED_CAP);
                     continue;
                 }
-                break rows;
+                // Exhausted means: we asked the index for everything it will give
+                // us under the scan cap and the lane is still short. That is a
+                // degraded answer and the caller has to be told so.
+                let semantic_exhausted = vector.is_some()
+                    && (semantic_count as usize) < lane_target
+                    && seed_exhausted
+                    && ann_seed >= ANN_SEED_CAP;
+                break (rows, semantic_count as usize, semantic_exhausted);
             };
-            Ok::<Vec<sqlx::postgres::PgRow>, AppError>(rows)
+            Ok::<(Vec<sqlx::postgres::PgRow>, usize, bool), AppError>(rows)
         };
 
-        let rows = tokio::time::timeout(RECALL_DB_DEADLINE, recall_work)
-            .await
-            .map_err(|_| AppError::QueryTimeout)??;
+        let (rows, semantic_count, semantic_exhausted) =
+            tokio::time::timeout(RECALL_DB_DEADLINE, recall_work)
+                .await
+                .map_err(|_| AppError::QueryTimeout)??;
 
         tx.commit().await?;
-        rows.into_iter().map(row_to_item).collect()
+        let items: Result<Vec<MemoryItem>, AppError> = rows.into_iter().map(row_to_item).collect();
+        Ok(RecallOutcome {
+            items: items?,
+            semantic_count,
+            semantic_exhausted,
+        })
     }
 
     async fn mandatory(

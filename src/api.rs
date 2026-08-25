@@ -230,7 +230,7 @@ async fn recall(
     } else {
         (None, None)
     };
-    let items = state
+    let outcome = state
         .store
         .recall(
             &identity,
@@ -240,17 +240,32 @@ async fn recall(
             request.intent,
             request.limit,
         )
-        .await?
+        .await?;
+    let semantic_count = outcome.semantic_count;
+    let semantic_exhausted = outcome.semantic_exhausted;
+    let items = outcome
+        .items
         .into_iter()
         .filter(|item| !mandatory_ids.contains(&item.id))
         .collect();
+    // Reporting "hybrid" whenever an embedding existed hid two different failures:
+    // a semantic lane that returned nothing, and a lane cut short by the ANN scan
+    // cap. Both are degraded retrieval and the contract requires saying so.
+    let degraded_reason = degraded_reason.or_else(|| {
+        if semantic_exhausted {
+            Some("semantic_candidate_exhausted".into())
+        } else {
+            None
+        }
+    });
+    let retrieval_mode = if embedding.is_some() && semantic_count > 0 {
+        RetrievalMode::Hybrid
+    } else {
+        RetrievalMode::LexicalOnly
+    };
     let mut response = RecallResponse {
         intent: request.intent,
-        retrieval_mode: if embedding.is_some() {
-            RetrievalMode::Hybrid
-        } else {
-            RetrievalMode::LexicalOnly
-        },
+        retrieval_mode,
         embedding_model: embedding.as_ref().map(|value| value.model.clone()),
         degraded_reason,
         mandatory_policy: mandatory,

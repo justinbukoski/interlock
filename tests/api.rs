@@ -22,8 +22,10 @@ use interlock::{
         Observation, ObservationWriteRequest, RecallIntent, RecallResponse, ScopeSelector,
         WriteResponse,
     },
+    embedding::{Embedding, EmbeddingProvider},
     error::AppError,
     router,
+    store::RecallOutcome,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -38,6 +40,8 @@ struct FakeStore {
     project: Vec<MemoryItem>,
     handoff: Option<Handoff>,
     recall_error: Option<fn() -> AppError>,
+    semantic_count: usize,
+    semantic_exhausted: bool,
 }
 
 #[async_trait]
@@ -53,11 +57,15 @@ impl MemoryStore for FakeStore {
         _: Option<&interlock::embedding::Embedding>,
         _: RecallIntent,
         _: usize,
-    ) -> Result<Vec<MemoryItem>, AppError> {
+    ) -> Result<RecallOutcome, AppError> {
         if let Some(make_error) = self.recall_error {
             return Err(make_error());
         }
-        Ok(self.recalled.clone())
+        Ok(RecallOutcome {
+            items: self.recalled.clone(),
+            semantic_count: self.semantic_count,
+            semantic_exhausted: self.semantic_exhausted,
+        })
     }
     async fn mandatory(
         &self,
@@ -141,6 +149,40 @@ fn item(predicate: &str, rendered: impl Into<String>) -> MemoryItem {
 
 fn app(store: FakeStore) -> axum::Router {
     app_with_role(store, TokenRole::Owner)
+}
+
+/// Returns a vector immediately, or after `delay` — enough to drive both the
+/// healthy hybrid path and the interactive embedding deadline.
+struct FakeEmbedder {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl EmbeddingProvider for FakeEmbedder {
+    async fn embed(&self, _: &str) -> Result<Embedding, AppError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(Embedding {
+            values: vec![0.01_f32; 1024],
+            model: "test-embedder".into(),
+        })
+    }
+}
+
+fn app_with_embedder(store: FakeStore, delay: std::time::Duration) -> axum::Router {
+    let token_hash = hex::encode(Sha256::digest(b"correct-token"));
+    let grant = TokenGrant {
+        token_sha256: token_hash,
+        tenant_id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
+        consumer_id: Uuid::new_v4(),
+        actor: "test".into(),
+        role: TokenRole::Owner,
+    };
+    let auth = AuthConfig::new(vec![grant]).unwrap();
+    let state = AppState::new(Arc::new(store), auth)
+        .unwrap()
+        .with_embedder(Arc::new(FakeEmbedder { delay }));
+    router(state)
 }
 
 fn app_with_role(store: FakeStore, role: TokenRole) -> axum::Router {
@@ -714,5 +756,114 @@ async fn query_timeout_is_a_gateway_timeout_not_a_retryable_conflict() {
     assert!(
         !message.contains("conflict") && !message.contains("retry"),
         "message must not suggest a transaction conflict or a retry: {message}"
+    );
+}
+
+/// The ANN scan cap being reached is degraded retrieval, not healthy hybrid
+/// retrieval. Before this the response said `hybrid` with no degraded_reason,
+/// which misstated the quality of the answer to every caller.
+#[tokio::test]
+async fn semantic_cap_exhaustion_is_reported_not_hidden() {
+    let store = FakeStore {
+        recalled: vec![item("system.note", "a lexical hit")],
+        semantic_count: 3,
+        semantic_exhausted: true,
+        ..Default::default()
+    };
+    let response = app_with_embedder(store, std::time::Duration::ZERO)
+        .oneshot(post(
+            "/v6/recall",
+            json!({"query":"x","token_budget":16000}),
+            true,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        body.pointer("/degraded_reason"),
+        Some(&json!("semantic_candidate_exhausted"))
+    );
+}
+
+/// An empty semantic lane must not be labelled hybrid just because a query
+/// embedding happened to exist.
+#[tokio::test]
+async fn empty_semantic_lane_is_lexical_only_not_hybrid() {
+    let store = FakeStore {
+        recalled: vec![item("system.note", "a lexical hit")],
+        semantic_count: 0,
+        ..Default::default()
+    };
+    let response = app_with_embedder(store, std::time::Duration::ZERO)
+        .oneshot(post(
+            "/v6/recall",
+            json!({"query":"x","token_budget":16000}),
+            true,
+        ))
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+    assert_eq!(
+        body.pointer("/retrieval_mode"),
+        Some(&json!("lexical_only"))
+    );
+}
+
+/// Control: a healthy lane still reports hybrid, so the two tests above cannot
+/// pass merely because the harness never produces hybrid.
+#[tokio::test]
+async fn healthy_semantic_lane_still_reports_hybrid() {
+    let store = FakeStore {
+        recalled: vec![item("system.note", "a hit")],
+        semantic_count: 12,
+        semantic_exhausted: false,
+        ..Default::default()
+    };
+    let response = app_with_embedder(store, std::time::Duration::ZERO)
+        .oneshot(post(
+            "/v6/recall",
+            json!({"query":"x","token_budget":16000}),
+            true,
+        ))
+        .await
+        .unwrap();
+    let body = json_body(response).await;
+    assert_eq!(body.pointer("/retrieval_mode"), Some(&json!("hybrid")));
+    assert_eq!(body.pointer("/degraded_reason"), Some(&json!(null)));
+}
+
+/// A stalled embedder must degrade to lexical retrieval well inside the MCP
+/// client deadline, not hold the caller's connection until it gives up.
+#[tokio::test]
+async fn slow_embedder_degrades_to_lexical_within_the_deadline() {
+    let store = FakeStore {
+        recalled: vec![item("system.note", "a lexical hit")],
+        semantic_count: 0,
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let response = app_with_embedder(store, std::time::Duration::from_secs(30))
+        .oneshot(post(
+            "/v6/recall",
+            json!({"query":"x","token_budget":16000}),
+            true,
+        ))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "must not wait on the embedder past the interactive deadline: {elapsed:?}"
+    );
+    let body = json_body(response).await;
+    assert_eq!(
+        body.pointer("/degraded_reason"),
+        Some(&json!("query_embedding_timeout"))
+    );
+    assert_eq!(
+        body.pointer("/retrieval_mode"),
+        Some(&json!("lexical_only"))
     );
 }
