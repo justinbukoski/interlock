@@ -713,6 +713,11 @@ const ITEM_SELECT: &str = r#"
 /// With empty $11/$12 the semantic lane is empty and this degrades to
 /// lexical-only retrieval, which is the correct behaviour when no query
 /// embedding is available.
+/// Whole-operation budget for the adaptive recall loop, comfortably inside
+/// interlock-mcp's 20s request deadline. Individual statements keep their own
+/// 5s statement_timeout; this bounds the ladder of retries as a whole.
+const RECALL_DB_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 const RECALL_SQL: &str = r#"
 WITH ranked_applicable AS MATERIALIZED (
   SELECT p.id,p.subject_key,pr.key AS predicate_key,p.cardinality,p.object_hash,
@@ -758,6 +763,8 @@ WITH ranked_applicable AS MATERIALIZED (
     SELECT id,1.0/(60+rank) AS score FROM lexical
     UNION ALL SELECT id,1.0/(60+rank) AS score FROM semantic
   ) lanes GROUP BY id
+), lane_counts AS (
+  SELECT (SELECT count(*) FROM semantic) AS semantic_count
 ), selected AS MATERIALIZED (
   SELECT w.id,w.specificity,w.consumer_specific,w.authority_rank,w.recorded_at,f.relevance
   FROM winners w JOIN fused f USING (id)
@@ -767,11 +774,13 @@ WITH ranked_applicable AS MATERIALIZED (
 )
 SELECT p.id,p.subject_key,pr.key AS predicate_key,p.cardinality,p.object_hash,
        p.object_value,p.rendered,p.authority,p.epistemic_status,s.scope_level,
-       p.source_type,p.source_ref,p.valid_from,p.valid_to,p.recorded_at,p.status
+       p.source_type,p.source_ref,p.valid_from,p.valid_to,p.recorded_at,p.status,
+       lc.semantic_count
 FROM selected x
 JOIN propositions p ON p.id=x.id
 JOIN predicates pr ON pr.id=p.predicate_id
 JOIN scopes s ON s.id=p.scope_id
+CROSS JOIN lane_counts lc
 ORDER BY x.specificity DESC,x.consumer_specific DESC,x.authority_rank ASC,
          x.relevance DESC,x.recorded_at DESC,x.id ASC
 "#;
@@ -896,6 +905,10 @@ impl MemoryStore for PgMemoryStore {
             "SET LOCAL statement_timeout='5s'",
             "SET LOCAL idle_in_transaction_session_timeout='10s'",
             "SET LOCAL hnsw.iterative_scan='strict_order'",
+            // Recall reads only. SET LOCAL keeps this scoped to this transaction:
+            // the plain SET TRANSACTION form escaped onto pooled connections and
+            // made unrelated writes fail with 25006.
+            "SET LOCAL transaction_read_only=on",
         ] {
             sqlx::query(statement).execute(&mut *tx).await?;
         }
@@ -912,65 +925,90 @@ impl MemoryStore for PgMemoryStore {
         let mut seed_ids: Vec<Uuid> = Vec::new();
         let mut seed_distances: Vec<f64> = Vec::new();
 
-        let rows = loop {
-            if let (Some(vector), Some(model)) = (vector.as_deref(), embedding_model) {
-                // The planner costs the sequential scan marginally cheaper than the
-                // HNSW scan on this corpus (2951 vs 2471..3141 at seed 160), so it
-                // picks the brute-force plan unless told otherwise. Scoped to this
-                // statement only: Query B still needs sequential scans.
-                sqlx::query("SET LOCAL enable_seqscan=off")
-                    .execute(&mut *tx)
-                    .await?;
-                let seed_rows = sqlx::query(
-                    r#"SELECT pe.proposition_id AS id, pe.embedding <=> $3::vector AS distance
+        // Each statement has its own 5s timeout, but the retry ladder can run up
+        // to eight A/B pairs. Without a deadline over the whole operation the
+        // server can still be working long after interlock-mcp abandoned the call
+        // at 20s, which is the failure mode this change exists to remove.
+        let recall_work = async {
+            let rows = loop {
+                if let (Some(vector), Some(model)) = (vector.as_deref(), embedding_model) {
+                    // The planner costs the sequential scan marginally cheaper than the
+                    // HNSW scan on this corpus (2951 vs 2471..3141 at seed 160), so it
+                    // picks the brute-force plan unless told otherwise. Scoped to this
+                    // statement only: Query B still needs sequential scans.
+                    sqlx::query("SET LOCAL enable_seqscan=off")
+                        .execute(&mut *tx)
+                        .await?;
+                    let seed_rows = sqlx::query(
+                        r#"SELECT pe.proposition_id AS id, pe.embedding <=> $3::vector AS distance
                        FROM proposition_embeddings pe
                        WHERE pe.embedding IS NOT NULL
                          AND pe.tenant_id=$1 AND pe.user_id=$2
                          AND pe.embedding_model=$4
                        ORDER BY pe.embedding <=> $3::vector
                        LIMIT $5"#,
-                )
-                .bind(identity.tenant_id)
-                .bind(identity.user_id)
-                .bind(vector)
-                .bind(model)
-                .bind(ann_seed as i64)
-                .fetch_all(&mut *tx)
-                .await?;
-                sqlx::query("SET LOCAL enable_seqscan=on")
-                    .execute(&mut *tx)
+                    )
+                    .bind(identity.tenant_id)
+                    .bind(identity.user_id)
+                    .bind(vector)
+                    .bind(model)
+                    .bind(ann_seed as i64)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    sqlx::query("SET LOCAL enable_seqscan=on")
+                        .execute(&mut *tx)
+                        .await?;
+
+                    seed_ids = seed_rows.iter().map(|row| row.get("id")).collect();
+                    seed_distances = seed_rows.iter().map(|row| row.get("distance")).collect();
+                }
+
+                let rows = sqlx::query(RECALL_SQL)
+                    .bind(identity.tenant_id)
+                    .bind(identity.user_id)
+                    .bind(identity.consumer_id)
+                    .bind(&scope.project_key)
+                    .bind(&scope.repository_key)
+                    .bind(&scope.thread_id)
+                    .bind(&scope.session_id)
+                    .bind(query)
+                    .bind(limit as i64)
+                    .bind(lane_target as i64)
+                    .bind(&seed_ids)
+                    .bind(&seed_distances)
+                    .fetch_all(&mut *tx)
                     .await?;
 
-                seed_ids = seed_rows.iter().map(|row| row.get("id")).collect();
-                seed_distances = seed_rows.iter().map(|row| row.get("distance")).collect();
-            }
-
-            let rows = sqlx::query(RECALL_SQL)
-                .bind(identity.tenant_id)
-                .bind(identity.user_id)
-                .bind(identity.consumer_id)
-                .bind(&scope.project_key)
-                .bind(&scope.repository_key)
-                .bind(&scope.thread_id)
-                .bind(&scope.session_id)
-                .bind(query)
-                .bind(limit as i64)
-                .bind(lane_target as i64)
-                .bind(&seed_ids)
-                .bind(&seed_distances)
-                .fetch_all(&mut *tx)
-                .await?;
-
-            // Only expand when the seed was actually exhausted — a short seed means
-            // the index ran out of neighbours, not that filtering was aggressive.
-            let seed_exhausted = seed_ids.len() == ann_seed;
-            let underfilled = rows.len() < limit;
-            if vector.is_some() && underfilled && seed_exhausted && ann_seed < ANN_SEED_CAP {
-                ann_seed = std::cmp::min(ann_seed.saturating_mul(2), ANN_SEED_CAP);
-                continue;
-            }
-            break rows;
+                // Expansion must be driven by how full the *semantic lane* is, not by
+                // the size of the final response: a lexical result that happens to fill
+                // `limit` would otherwise mask a completely empty semantic lane and stop
+                // expansion while eligible neighbours went unexamined.
+                //
+                // No selected rows means nothing survived either lane, so the semantic
+                // lane is empty too — any surviving candidate would have produced one.
+                let semantic_count: i64 = rows
+                    .first()
+                    .map(|row| row.get("semantic_count"))
+                    .unwrap_or(0);
+                // A short seed means the index ran out of neighbours, not that filtering
+                // was aggressive; only an exhausted seed is worth re-running.
+                let seed_exhausted = seed_ids.len() == ann_seed;
+                if vector.is_some()
+                    && (semantic_count as usize) < lane_target
+                    && seed_exhausted
+                    && ann_seed < ANN_SEED_CAP
+                {
+                    ann_seed = std::cmp::min(ann_seed.saturating_mul(2), ANN_SEED_CAP);
+                    continue;
+                }
+                break rows;
+            };
+            Ok::<Vec<sqlx::postgres::PgRow>, AppError>(rows)
         };
+
+        let rows = tokio::time::timeout(RECALL_DB_DEADLINE, recall_work)
+            .await
+            .map_err(|_| AppError::QueryTimeout)??;
 
         tx.commit().await?;
         rows.into_iter().map(row_to_item).collect()
