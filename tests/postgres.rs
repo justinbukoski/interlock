@@ -1245,3 +1245,100 @@ async fn outbox_drains_completes_and_prunes_only_finished_events() {
         .unwrap();
     assert_eq!(remaining, 0, "aged, completed events must be collected");
 }
+/// An exact subject lookup is its own retrieval lane. It must survive fusion
+/// even when the semantic seed is full of unrelated, higher-authority rows.
+///
+/// This reproduces the 2026-08-27 production symptom through a structural risk
+/// in the same path: lexical generation finds the fresh row, then the final
+/// authority-first LIMIT discards it behind unrelated owner-authority semantic
+/// candidates. The transient production trigger was not captured.
+#[tokio::test]
+#[ignore = "requires TEST_DATABASE_URL pointing at disposable PostgreSQL with pgvector 0.8.2+"]
+async fn exact_subject_lookup_survives_semantic_fusion_and_authority_ordering() {
+    let database_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let store = PgMemoryStore::new(pool.clone());
+    store.migrate().await.unwrap();
+
+    let owner = identity(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let scope = ScopeSelector {
+        project_key: Some(format!("git:test/exact-lane-{}", Uuid::new_v4())),
+        ..Default::default()
+    };
+    let target_subject = format!("exact-recall-fixture-{}", Uuid::new_v4());
+    let target = store
+        .remember(
+            &owner,
+            &MemoryWriteRequest {
+                request_id: Uuid::new_v4(),
+                scope: scope.clone(),
+                subject: target_subject.clone(),
+                predicate: "project.state".into(),
+                object: json!({"value":"fresh exact target"}),
+                authority: Authority::MechanicallyVerified,
+                epistemic_status: EpistemicStatus::Verified,
+                source_type: "integration_test".into(),
+                source_ref: "test:exact-lane-target".into(),
+                reason: "prove exact lookup survives hybrid fusion".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    // StaticEmbedder gives every row the same vector. More than `limit`
+    // unrelated owner-authority rows therefore fill the semantic lane and
+    // outrank the mechanically-verified target unless exact lookup is carried
+    // independently through final selection.
+    for index in 0..12 {
+        store
+            .remember(
+                &owner,
+                &MemoryWriteRequest {
+                    request_id: Uuid::new_v4(),
+                    scope: scope.clone(),
+                    subject: format!("semantic-distractor-{index}-{}", Uuid::new_v4()),
+                    predicate: "project.state".into(),
+                    object: json!({"value":format!("unrelated owner row {index}")}),
+                    authority: Authority::OwnerInstruction,
+                    epistemic_status: EpistemicStatus::Verified,
+                    source_type: "integration_test".into(),
+                    source_ref: format!("test:exact-lane-distractor-{index}"),
+                    reason: "fill the semantic lane with higher-authority distractors".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .embed_pending(&StaticEmbedder, "test-bge", 64, Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let query_embedding = StaticEmbedder.embed(&target_subject).await.unwrap();
+    let outcome = store
+        .recall(
+            &owner,
+            &scope,
+            &target_subject,
+            Some(&query_embedding),
+            RecallIntent::Current,
+            10,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        outcome.items.iter().any(|item| item.id == target.id),
+        "exact subject {target_subject} was generated lexically but discarded after fusion: {:?}",
+        outcome
+            .items
+            .iter()
+            .map(|item| (&item.subject, item.authority))
+            .collect::<Vec<_>>()
+    );
+}
+
