@@ -33,9 +33,10 @@ when the response explicitly presents an unresolved conflict.
 5. Remove invalid, superseded, quarantined, expired, and temporally inapplicable
    rows. History intent may request these with explicit state labels.
 6. Collapse duplicate canonical keys and apply structural supersession.
-7. Rank by scope specificity, authority tier, epistemic state, temporal fit,
-   retrieval relevance, and diversity. Learned relevance cannot overturn the
-   first five deterministic dimensions.
+7. Preserve exact subject and predicate lookup ahead of unrelated candidates,
+   then rank each cohort by scope specificity, authority tier, epistemic state,
+   temporal fit, retrieval relevance, and diversity. Learned relevance cannot
+   overturn exact lookup or the deterministic dimensions.
 8. Render provenance-bearing items, then enforce the token budget on the actual
    serialized representation.
 
@@ -95,6 +96,8 @@ outbox. Cache absence or rebuild changes latency, never semantics.
 
 - Same snapshot plus same request produces byte-equivalent ordered content,
   excluding request IDs and measured timing.
+- An exact subject or predicate lookup is not displaced by unrelated semantic
+  candidates, regardless of their authority tier.
 - Ordinary recall returns no structurally superseded or invalid proposition.
 - Cross-project and cross-user adversarial records are never candidates after
   authorization filtering.

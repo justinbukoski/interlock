@@ -857,6 +857,19 @@ WITH ranked_applicable AS MATERIALIZED (
     AND (s.session_id IS NULL OR s.session_id=$7)
 ), winners AS MATERIALIZED (
   SELECT * FROM ranked_applicable WHERE precedence=1
+), exact_matches AS (
+  SELECT id,specificity,consumer_specific,authority_rank,recorded_at
+  FROM winners
+  WHERE lower(subject_key)=lower($8) OR lower(predicate_key)=lower($8)
+), exact AS (
+  SELECT id,row_number() OVER (
+    ORDER BY specificity DESC,consumer_specific DESC,authority_rank ASC,
+             recorded_at DESC,id ASC
+  ) AS rank
+  FROM exact_matches
+  ORDER BY specificity DESC,consumer_specific DESC,authority_rank ASC,
+           recorded_at DESC,id ASC
+  LIMIT $10
 ), lexical_matches AS (
   SELECT id,ts_rank_cd(search_document,websearch_to_tsquery('english',$8)) AS score
   FROM winners
@@ -875,16 +888,18 @@ WITH ranked_applicable AS MATERIALIZED (
   FROM semantic_seed s JOIN winners w USING (id)
   ORDER BY s.distance,s.id LIMIT $10
 ), fused AS (
-  SELECT id,sum(score) AS relevance FROM (
-    SELECT id,1.0/(60+rank) AS score FROM lexical
-    UNION ALL SELECT id,1.0/(60+rank) AS score FROM semantic
+  SELECT id,sum(score) AS relevance,bool_or(exact_match) AS exact_match FROM (
+    SELECT id,1.0/(60+rank) AS score,true AS exact_match FROM exact
+    UNION ALL SELECT id,1.0/(60+rank) AS score,false AS exact_match FROM lexical
+    UNION ALL SELECT id,1.0/(60+rank) AS score,false AS exact_match FROM semantic
   ) lanes GROUP BY id
 ), lane_counts AS (
   SELECT (SELECT count(*) FROM semantic) AS semantic_count
 ), selected AS MATERIALIZED (
-  SELECT w.id,w.specificity,w.consumer_specific,w.authority_rank,w.recorded_at,f.relevance
+  SELECT w.id,w.specificity,w.consumer_specific,w.authority_rank,w.recorded_at,
+         f.relevance,f.exact_match
   FROM winners w JOIN fused f USING (id)
-  ORDER BY w.specificity DESC,w.consumer_specific DESC,w.authority_rank ASC,
+  ORDER BY f.exact_match DESC,w.specificity DESC,w.consumer_specific DESC,w.authority_rank ASC,
            f.relevance DESC,w.recorded_at DESC,w.id ASC
   LIMIT $9
 )
@@ -897,7 +912,7 @@ JOIN propositions p ON p.id=x.id
 JOIN predicates pr ON pr.id=p.predicate_id
 JOIN scopes s ON s.id=p.scope_id
 CROSS JOIN lane_counts lc
-ORDER BY x.specificity DESC,x.consumer_specific DESC,x.authority_rank ASC,
+ORDER BY x.exact_match DESC,x.specificity DESC,x.consumer_specific DESC,x.authority_rank ASC,
          x.relevance DESC,x.recorded_at DESC,x.id ASC
 "#;
 
