@@ -354,7 +354,7 @@ impl Sink {
         self.already_present += ack.already_present as u64;
         self.pending.clear();
         self.posted_batches += 1;
-        if self.posted_batches % 100 == 0 {
+        if self.posted_batches.is_multiple_of(100) {
             eprintln!(
                 "progress: {} batches, accepted={}, already_present={}",
                 self.posted_batches, self.accepted, self.already_present
@@ -431,6 +431,7 @@ fn parse_row(label: &str, rec: &csv::StringRecord) -> Row {
 
 /// One full pass over a source. When `sink` is None this is a pure
 /// classification scan (no events are built or POSTed).
+#[allow(clippy::too_many_arguments)] // import plumbing; bundling these into a struct is churn without benefit
 fn process_source(
     label: &str,
     path: &str,
