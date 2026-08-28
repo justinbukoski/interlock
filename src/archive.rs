@@ -528,11 +528,11 @@ impl PgArchiveStore {
     }
 
     /// Resolves the consumer scope for the redacted-archive READ paths —
-    /// search and evidence only. Reader, Miner, and Owner tokens read across
-    /// all of the tenant/user's consumers (design §11): events are ingested
+    /// search and evidence only. Reader and Owner tokens read across
+    /// all of the tenant/user's consumers: events are ingested
     /// under each capture adapter's consumer_id and a Reader never ingests, so
     /// confining readers to their own consumer matches zero rows — a silent
-    /// empty lie rather than a denial. What §11 withholds from readers is the
+    /// empty lie rather than a denial. What stays withheld from readers is the
     /// encrypted raw payload, which is not a field on either response struct.
     /// Writer and Verifier tokens stay confined exactly as below.
     fn read_consumer_filter(
@@ -549,7 +549,7 @@ impl PgArchiveStore {
     /// Resolves the consumer scope for strictly confined paths — export.
     /// Owner tokens may read across all consumers for the tenant/user; every
     /// other token is confined to its own consumer's content, so bulk export
-    /// stays owner-only per design §10/§11.
+    /// stays owner-only.
     fn confined_consumer_filter(
         identity: &Identity,
         requested: Option<Uuid>,
@@ -981,7 +981,7 @@ impl ArchiveStore for PgArchiveStore {
             )));
         }
         // No consumer_id parameter exists on this path; passing None through
-        // the read filter lets Reader/Miner span the tenant/user's consumers
+        // the read filter lets Reader span the tenant/user's consumers
         // while Writer/Verifier fall back to their own consumer.
         let consumer = Self::read_consumer_filter(identity, None)?;
         let rows = sqlx::query(
