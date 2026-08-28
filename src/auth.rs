@@ -31,6 +31,13 @@ impl TokenRole {
     pub fn is_owner(self) -> bool {
         self == Self::Owner
     }
+    /// Cross-consumer read of REDACTED archive content on the search and
+    /// evidence paths (design section 11). Reader joins Owner; Writer and
+    /// Verifier stay confined to their own consumer, and no role gains
+    /// encrypted raw payloads, export, or deletion through this predicate.
+    pub fn can_read_redacted_archive(self) -> bool {
+        matches!(self, Self::Reader | Self::Owner)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,4 +118,17 @@ pub async fn require_auth(
     let identity = config.authenticate(token).ok_or(AppError::Unauthorized)?;
     request.extensions_mut().insert(identity);
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenRole;
+
+    #[test]
+    fn redacted_archive_read_is_exactly_reader_and_owner() {
+        assert!(TokenRole::Reader.can_read_redacted_archive());
+        assert!(TokenRole::Owner.can_read_redacted_archive());
+        assert!(!TokenRole::Writer.can_read_redacted_archive());
+        assert!(!TokenRole::Verifier.can_read_redacted_archive());
+    }
 }

@@ -378,3 +378,378 @@ async fn ingestion_requires_write_and_delete_requires_owner() {
             .is_err()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires TEST_ARCHIVE_DATABASE_URL pointing at disposable PostgreSQL"]
+async fn reader_reads_redacted_archive_across_consumers() {
+    let store = store().await;
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    // Events are ingested under the capture adapter's consumer_id; a Reader
+    // never ingests and carries a different consumer_id of its own. Before the
+    // reader-visibility fix the consumer filter matched zero rows here and the
+    // lane answered [] instead of the user's events.
+    let writer = identity(tenant, user, Uuid::new_v4(), TokenRole::Writer);
+    let reader = identity(tenant, user, Uuid::new_v4(), TokenRole::Reader);
+    let sid = format!("reader-{}", Uuid::new_v4());
+    let mut input = event(&sid, "quokka cross consumer needle", 5);
+    input.raw_content_ref = Some("encrypted:raw-reader-1".into());
+    let ack = store
+        .ingest_batch(
+            &writer,
+            &ArchiveIngestRequest {
+                events: vec![input],
+            },
+        )
+        .await
+        .unwrap();
+    let event_id = ack.acks[0].event_id.unwrap();
+
+    let found = store
+        .search(
+            &reader,
+            &ArchiveSearchRequest {
+                query: Some("quokka".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].consumer_id, writer.consumer_id);
+    assert_eq!(found[0].redacted_content, "quokka cross consumer needle");
+    assert!(found[0].raw_available);
+
+    let evidence = store.evidence(&reader, &[event_id]).await.unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0].source_event_id, sid);
+    assert!(evidence[0].raw_available);
+
+    // Raw availability is reported; the encrypted locator itself never appears
+    // in either serialized response.
+    for serialized in [
+        serde_json::to_string(&found).unwrap(),
+        serde_json::to_string(&evidence).unwrap(),
+    ] {
+        assert!(!serialized.contains("encrypted:"));
+        assert!(!serialized.contains("raw-reader-1"));
+    }
+
+    // Widening consumer scope did not widen tenant/user scope (§11: all
+    // cross-application retrieval stays tenant- and user-scoped): a Reader of
+    // a different user in the same tenant sees nothing.
+    let stranger = identity(tenant, Uuid::new_v4(), Uuid::new_v4(), TokenRole::Reader);
+    assert!(
+        store
+            .search(
+                &stranger,
+                &ArchiveSearchRequest {
+                    query: Some("quokka".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .evidence(&stranger, &[event_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_ARCHIVE_DATABASE_URL pointing at disposable PostgreSQL"]
+async fn reader_visible_redacted_content_has_secrets_scrubbed() {
+    let store = store().await;
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let writer = identity(tenant, user, Uuid::new_v4(), TokenRole::Writer);
+    let reader = identity(tenant, user, Uuid::new_v4(), TokenRole::Reader);
+    let sid = format!("redact-{}", Uuid::new_v4());
+    store
+        .ingest_batch(
+            &writer,
+            &ArchiveIngestRequest {
+                events: vec![event(
+                    &sid,
+                    "rotate the api_key=sup3rs3cretvalue before Friday standup",
+                    5,
+                )],
+            },
+        )
+        .await
+        .unwrap();
+
+    // The security claim the widened Reader lane rests on: content is scrubbed
+    // at ingestion, so what crosses consumers is the redacted representation.
+    let found = store
+        .search(
+            &reader,
+            &ArchiveSearchRequest {
+                query: Some("rotate".into()),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(!found[0].redacted_content.contains("sup3rs3cretvalue"));
+    assert!(found[0].redacted_content.contains("[REDACTED_SECRET]"));
+    assert!(found[0].redaction_count >= 1);
+
+    let evidence = store
+        .evidence(&reader, &[found[0].event_id])
+        .await
+        .unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert!(!evidence[0].redacted_content.contains("sup3rs3cretvalue"));
+    assert!(evidence[0].redaction_count >= 1);
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_ARCHIVE_DATABASE_URL pointing at disposable PostgreSQL"]
+async fn export_and_non_reader_roles_stay_consumer_confined() {
+    let store = store().await;
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let writer = identity(tenant, user, Uuid::new_v4(), TokenRole::Writer);
+    let reader = identity(tenant, user, Uuid::new_v4(), TokenRole::Reader);
+    let sid = format!("bound-{}", Uuid::new_v4());
+    let ack = store
+        .ingest_batch(
+            &writer,
+            &ArchiveIngestRequest {
+                events: vec![event(&sid, "boundary needle", 5)],
+            },
+        )
+        .await
+        .unwrap();
+    let event_id = ack.acks[0].event_id.unwrap();
+
+    // Reader on export stays confined: an unfiltered export spans only the
+    // reader's own (empty) consumer, and an explicit foreign consumer_id is a
+    // hard 403, never a silent cross-consumer bulk read.
+    let export = store
+        .export(
+            &reader,
+            &ArchiveExportRequest {
+                consumer_id: None,
+                project_key: None,
+                thread_id: None,
+                from: None,
+                to: None,
+                after_ingestion_seq: None,
+                limit: 100,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        export
+            .events
+            .iter()
+            .all(|event| event.source_event_id != sid)
+    );
+    assert!(
+        matches!(
+            store
+                .export(
+                    &reader,
+                    &ArchiveExportRequest {
+                        consumer_id: Some(writer.consumer_id),
+                        project_key: None,
+                        thread_id: None,
+                        from: None,
+                        to: None,
+                        after_ingestion_seq: None,
+                        limit: 100,
+                    },
+                )
+                .await,
+            Err(AppError::Forbidden)
+        ),
+        "reader export with an explicit foreign consumer_id must be forbidden"
+    );
+
+    // Writer on search: unfiltered reads stay its own consumer (it ingested,
+    // so it finds its own event); an explicit foreign consumer_id is rejected.
+    let own = store
+        .search(
+            &writer,
+            &ArchiveSearchRequest {
+                limit: 50,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(own.iter().any(|event| event.source_event_id == sid));
+    assert!(matches!(
+        store
+            .search(
+                &writer,
+                &ArchiveSearchRequest {
+                    consumer_id: Some(reader.consumer_id),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await,
+        Err(AppError::Forbidden)
+    ));
+
+    // Verifier on search/evidence has no cross-consumer visibility at all:
+    // its consumer ingested nothing, so both read paths return nothing.
+    let verifier = identity(tenant, user, Uuid::new_v4(), TokenRole::Verifier);
+    assert!(
+        store
+            .search(
+                &verifier,
+                &ArchiveSearchRequest {
+                    limit: 50,
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .evidence(&verifier, &[event_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_ARCHIVE_DATABASE_URL pointing at disposable PostgreSQL"]
+async fn reader_cannot_delete_or_advance_mining_state() {
+    let store = store().await;
+    let reader = identity(
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        TokenRole::Reader,
+    );
+    // Ingestion denial is already pinned above; the widened redacted read
+    // lane grants nothing on the deletion or mining-cursor paths.
+    assert!(
+        matches!(
+            store
+                .create_deletion(
+                    &reader,
+                    &DeletionRequest {
+                        request_id: Uuid::new_v4(),
+                        mode: DeletionMode::Full,
+                        consumer_id: None,
+                        project_key: None,
+                        thread_id: None,
+                        session_id: None,
+                        from: None,
+                        to: None,
+                    }
+                )
+                .await,
+            Err(AppError::Forbidden)
+        ),
+        "reader cannot create a deletion intent"
+    );
+    assert!(
+        matches!(
+            store.run_deletion(&reader, Uuid::new_v4()).await,
+            Err(AppError::Forbidden)
+        ),
+        "reader cannot run a deletion intent"
+    );
+    assert!(
+        matches!(
+            store.mining_pending(&reader, "gen-denied", 10).await,
+            Err(AppError::Forbidden)
+        ),
+        "reader cannot read mining windows"
+    );
+    assert!(
+        matches!(
+            store.advance_cursor(&reader, "gen-denied", 1).await,
+            Err(AppError::Forbidden)
+        ),
+        "reader cannot advance the mining cursor"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires TEST_ARCHIVE_DATABASE_URL pointing at disposable PostgreSQL"]
+async fn tombstoned_events_stay_invisible_to_reader_reads() {
+    let store = store().await;
+    let tenant = Uuid::new_v4();
+    let user = Uuid::new_v4();
+    let writer = identity(tenant, user, Uuid::new_v4(), TokenRole::Writer);
+    let reader = identity(tenant, user, Uuid::new_v4(), TokenRole::Reader);
+    let owner = identity(tenant, user, Uuid::new_v4(), TokenRole::Owner);
+    let sid = format!("tomb-{}", Uuid::new_v4());
+    let ack = store
+        .ingest_batch(
+            &writer,
+            &ArchiveIngestRequest {
+                events: vec![event(&sid, "expunge needle", 5)],
+            },
+        )
+        .await
+        .unwrap();
+    let event_id = ack.acks[0].event_id.unwrap();
+
+    // The event() helper files everything under thread-1, so a thread-scoped
+    // full deletion covers it.
+    let intent = store
+        .create_deletion(
+            &owner,
+            &DeletionRequest {
+                request_id: Uuid::new_v4(),
+                mode: DeletionMode::Full,
+                consumer_id: None,
+                project_key: None,
+                thread_id: Some("thread-1".into()),
+                session_id: None,
+                from: None,
+                to: None,
+            },
+        )
+        .await
+        .unwrap();
+    store.run_deletion(&owner, intent.intent_id).await.unwrap();
+
+    // §10's "exclude from every search/read path" guards the widened Reader
+    // audience too: tombstoned events stay invisible to reader search/evidence.
+    assert!(
+        store
+            .search(
+                &reader,
+                &ArchiveSearchRequest {
+                    query: Some("expunge".into()),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .evidence(&reader, &[event_id])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

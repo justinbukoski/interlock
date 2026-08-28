@@ -527,9 +527,30 @@ impl PgArchiveStore {
         Ok(())
     }
 
+    /// Resolves the consumer scope for the redacted-archive READ paths —
+    /// search and evidence only. Reader, Miner, and Owner tokens read across
+    /// all of the tenant/user's consumers (design §11): events are ingested
+    /// under each capture adapter's consumer_id and a Reader never ingests, so
+    /// confining readers to their own consumer matches zero rows — a silent
+    /// empty lie rather than a denial. What §11 withholds from readers is the
+    /// encrypted raw payload, which is not a field on either response struct.
+    /// Writer and Verifier tokens stay confined exactly as below.
+    fn read_consumer_filter(
+        identity: &Identity,
+        requested: Option<Uuid>,
+    ) -> Result<Option<Uuid>, AppError> {
+        if identity.role.can_read_redacted_archive() {
+            Ok(requested)
+        } else {
+            Self::confined_consumer_filter(identity, requested)
+        }
+    }
+
+    /// Resolves the consumer scope for strictly confined paths — export.
     /// Owner tokens may read across all consumers for the tenant/user; every
-    /// other token is confined to its own consumer's content.
-    fn consumer_filter(
+    /// other token is confined to its own consumer's content, so bulk export
+    /// stays owner-only per design §10/§11.
+    fn confined_consumer_filter(
         identity: &Identity,
         requested: Option<Uuid>,
     ) -> Result<Option<Uuid>, AppError> {
@@ -894,7 +915,7 @@ impl ArchiveStore for PgArchiveStore {
         request: &ArchiveSearchRequest,
         query_embedding: Option<&Embedding>,
     ) -> Result<Vec<ArchiveEventSummary>, AppError> {
-        let consumer = Self::consumer_filter(identity, request.consumer_id)?;
+        let consumer = Self::read_consumer_filter(identity, request.consumer_id)?;
         let limit = request.limit.clamp(1, MAX_PAGE) as i64;
         let query = request
             .query
@@ -959,7 +980,10 @@ impl ArchiveStore for PgArchiveStore {
                 "evidence requires 1..{MAX_PAGE} event IDs"
             )));
         }
-        let consumer = Self::consumer_filter(identity, None)?;
+        // No consumer_id parameter exists on this path; passing None through
+        // the read filter lets Reader/Miner span the tenant/user's consumers
+        // while Writer/Verifier fall back to their own consumer.
+        let consumer = Self::read_consumer_filter(identity, None)?;
         let rows = sqlx::query(
             r#"SELECT event_id,ingestion_seq,source_event_id,installation_id,consumer_id,project_key,
                       repository_key,thread_id,session_id,turn_id,sequence_number,actor,event_kind,
@@ -985,7 +1009,7 @@ impl ArchiveStore for PgArchiveStore {
         identity: &Identity,
         request: &ArchiveExportRequest,
     ) -> Result<ArchiveExportResponse, AppError> {
-        let consumer = Self::consumer_filter(identity, request.consumer_id)?;
+        let consumer = Self::confined_consumer_filter(identity, request.consumer_id)?;
         let limit = request.limit.clamp(1, MAX_PAGE) as i64;
         let rows = sqlx::query(
             r#"SELECT event_id,ingestion_seq,source_event_id,installation_id,consumer_id,project_key,

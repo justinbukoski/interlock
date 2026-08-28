@@ -625,6 +625,10 @@ impl ContinuityStore for FakeContinuity {
 }
 
 fn app_65() -> axum::Router {
+    app_65_with_role(TokenRole::Owner)
+}
+
+fn app_65_with_role(role: TokenRole) -> axum::Router {
     let token_hash = hex::encode(Sha256::digest(b"correct-token"));
     let grant = TokenGrant {
         token_sha256: token_hash,
@@ -632,7 +636,7 @@ fn app_65() -> axum::Router {
         user_id: Uuid::new_v4(),
         consumer_id: Uuid::new_v4(),
         actor: "test".into(),
-        role: TokenRole::Owner,
+        role,
     };
     let auth = AuthConfig::new(vec![grant]).unwrap();
     let state = AppState::new(Arc::new(FakeStore::default()), auth)
@@ -669,6 +673,33 @@ async fn archive_routes_are_unavailable_when_not_configured() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Wiring regression for the v6.5 reader-visibility fix: the fleet MCP reaches
+/// archive_search and archive_evidence with a Reader token, so both routes
+/// must authenticate and dispatch to the store for that role. The
+/// cross-consumer visibility itself is the store's consumer filter and is
+/// pinned by the PostgreSQL integration tests in archive_pg.rs.
+#[tokio::test]
+async fn reader_role_reaches_archive_search_and_evidence_routes() {
+    let service = app_65_with_role(TokenRole::Reader);
+    let search = service
+        .clone()
+        .oneshot(post("/v6.5/archive/search", json!({}), true))
+        .await
+        .unwrap();
+    assert_eq!(search.status(), StatusCode::OK);
+    let evidence = service
+        .oneshot(
+            post(
+                "/v6.5/archive/evidence",
+                json!({"event_ids": [Uuid::new_v4()]}),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(evidence.status(), StatusCode::OK);
 }
 
 #[tokio::test]
