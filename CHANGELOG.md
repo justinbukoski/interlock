@@ -1,5 +1,26 @@
 # Changelog
 
+## 6.5.2 — 2026-08-28
+
+Correctness patch. One forward database migration (canonical 0007_outbox_drain,
+applied automatically by the installer). No breaking API changes.
+
+- recall: reach HNSW via a two-stage query so the ANN seed uses the index
+  instead of a full scan; statement timeouts now map to 504 query_timeout
+  instead of a misleading retryable conflict.
+- recall: correct the expansion signal, bound the loop, run read-only.
+- recall: report semantic lane state with a degraded_reason instead of
+  silently degrading to lexical.
+- recall: preserve exact subject lookup through RRF fusion so an exact match
+  cannot be displaced by higher-authority semantic distractors.
+- archive: Reader tokens can now search the redacted conversation archive and
+  retrieve evidence tenant/user-wide; previously they were silently confined
+  to their own consumer and always saw an empty history lane. Encrypted raw
+  payloads, export, and deletion remain owner-only.
+- outbox: add the missing drain worker and retention so the embedding outbox
+  no longer grows without bound.
+- ci: fix the two clippy -D warnings failures that turned the 6.5.1 badge red.
+
 ## 6.5.1 — 2026-08-23
 
 Correctness and security release. No breaking API changes; one forward
