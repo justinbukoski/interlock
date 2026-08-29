@@ -1,5 +1,28 @@
 # Changelog
 
+## 6.5.3 — 2026-08-28
+
+Adapter robustness: legible server errors, string handoff ids,
+expect_no_active in schema, env-name compatibility. MCP-adapter-only — no
+server changes, no database migrations, no breaking API changes.
+
+- The MCP adapter now reports non-2xx responses with non-JSON bodies as
+  `Interlock returned HTTP <status>: <first ~300 chars>` instead of the
+  generic invalid-JSON error, so plain-text 422s (e.g. axum's malformed-body
+  rejections) surface their real cause instead of reading like an outage.
+- `handoff_write`'s `request_id`/`session_id` accept any string; non-UUID
+  strings are deterministically mapped to a UUIDv5 in a fixed adapter
+  namespace before the request reaches the server, so harness-style ids
+  ("sess-...", dates, hostnames) no longer 422 and retries replay
+  idempotently. The tool schema documents the derivation.
+- The `handoff_write` schema's `expect_no_active` CAS-guard declaration was
+  audited and confirmed already present in this release line — no change
+  required.
+- The adapter accepts the `FOREMAN_V6_*` env family (`FOREMAN_V6_URL`,
+  `FOREMAN_V6_READER_TOKEN_FILE`, `FOREMAN_V6_WRITER_TOKEN_FILE`,
+  `FOREMAN_V6_OWNER_TOKEN_FILE`) as a fallback for configurations that
+  were configured under the older names; `INTERLOCK_*` always wins.
+
 ## 6.5.2 — 2026-08-28
 
 Correctness patch. One forward database migration (canonical 0007_outbox_drain,

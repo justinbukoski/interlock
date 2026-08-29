@@ -8,9 +8,11 @@ use std::{
     time::Duration,
 };
 use tokio::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use uuid::Uuid;
 
 const MAX_FRAME_BYTES: usize = 1_048_576;
 const MAX_RESPONSE_BYTES: usize = 4_194_304;
+const MAX_ERROR_BODY_CHARS: usize = 300;
 
 struct Config {
     base_url: Url,
@@ -20,33 +22,32 @@ struct Config {
 
 impl Config {
     fn from_env() -> Result<Self, String> {
+        // Deployments configured before the Interlock naming was settled may
+        // use older env names; accept INTERLOCK_* first, FOREMAN_V6_* as the fallback,
+        // so one binary serves every deployed configuration.
         let base_url = loopback_url(
-            &std::env::var("INTERLOCK_URL").unwrap_or_else(|_| "http://127.0.0.1:8851".into()),
+            &std::env::var("INTERLOCK_URL")
+                .or_else(|_| std::env::var("FOREMAN_V6_URL"))
+                .unwrap_or_else(|_| "http://127.0.0.1:8851".into()),
         )?;
-        let reader_path = configured_path(
-            "INTERLOCK_READER_TOKEN_FILE",
+        let reader_path = configured_path_multi(
+            &["INTERLOCK_READER_TOKEN_FILE", "FOREMAN_V6_READER_TOKEN_FILE"],
             ".config/interlock/reader-token",
         )?;
         // Routine agents run with the WRITER credential (observations, normal
         // memories, corrections, handoffs); the server's role checks stop a
-        // writer from minting owner-authority records. INTERLOCK_OWNER_TOKEN_FILE
+        // writer from minting owner-authority records. The OWNER credential
         // remains supported for a deliberate administrative session — see
         // docs/OWNER_ADMINISTRATION.md. When both are set, writer wins.
-        let write_path = if std::env::var_os("INTERLOCK_WRITER_TOKEN_FILE").is_some() {
-            configured_path(
-                "INTERLOCK_WRITER_TOKEN_FILE",
-                ".config/interlock/writer-token",
-            )?
-        } else if std::env::var_os("INTERLOCK_OWNER_TOKEN_FILE").is_some() {
-            configured_path(
-                "INTERLOCK_OWNER_TOKEN_FILE",
-                ".config/interlock/owner-token",
-            )?
+        // Each role honors both env families, INTERLOCK_* taking precedence.
+        let writer_keys = &["INTERLOCK_WRITER_TOKEN_FILE", "FOREMAN_V6_WRITER_TOKEN_FILE"];
+        let owner_keys = &["INTERLOCK_OWNER_TOKEN_FILE", "FOREMAN_V6_OWNER_TOKEN_FILE"];
+        let write_path = if writer_keys.iter().any(|key| std::env::var_os(key).is_some()) {
+            configured_path_multi(writer_keys, ".config/interlock/writer-token")?
+        } else if owner_keys.iter().any(|key| std::env::var_os(key).is_some()) {
+            configured_path_multi(owner_keys, ".config/interlock/owner-token")?
         } else {
-            configured_path(
-                "INTERLOCK_WRITER_TOKEN_FILE",
-                ".config/interlock/writer-token",
-            )?
+            configured_path_multi(writer_keys, ".config/interlock/writer-token")?
         };
         Ok(Self {
             base_url,
@@ -56,12 +57,14 @@ impl Config {
     }
 }
 
-fn configured_path(key: &str, default_relative: &str) -> Result<PathBuf, String> {
-    if let Ok(path) = std::env::var(key) {
-        if path.trim().is_empty() {
-            return Err(format!("{key} cannot be empty"));
+fn configured_path_multi(keys: &[&str], default_relative: &str) -> Result<PathBuf, String> {
+    for key in keys {
+        if let Ok(path) = std::env::var(key) {
+            if path.trim().is_empty() {
+                return Err(format!("{key} cannot be empty"));
+            }
+            return Ok(path.into());
         }
-        return Ok(path.into());
     }
     let home = std::env::var_os("HOME").ok_or_else(|| "HOME is required".to_string())?;
     Ok(PathBuf::from(home).join(default_relative))
@@ -274,9 +277,9 @@ fn handoff_write_schema() -> Value {
         "type":"object",
         "additionalProperties":false,
         "properties":{
-            "request_id":{"type":"string","format":"uuid"},
+            "request_id":{"type":"string","description":"Unique request id. Any string is accepted; non-UUID strings are deterministically mapped to a UUIDv5 before the request reaches the server (same string always maps to the same UUID, preserving idempotent replay)."},
             "context":context_ref_schema(),
-            "session_id":{"type":"string","minLength":1,"maxLength":256},
+            "session_id":{"type":"string","minLength":1,"maxLength":256,"description":"Identifying session string. Any string is accepted; non-UUID strings are deterministically mapped to a UUIDv5 before the request reaches the server."},
             "thread_id":{"type":["string","null"],"maxLength":512},
             "summary":{"type":"string","minLength":1,"maxLength":16384},
             "written_by":{"type":"string","minLength":1,"maxLength":256},
@@ -360,15 +363,68 @@ async fn call_api(
         }
         bytes.extend_from_slice(&chunk);
     }
+    if !status.is_success() {
+        return Err(non_success_error(status.as_u16(), &bytes));
+    }
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|_| "Interlock returned invalid JSON".to_string())?;
-    if !status.is_success() {
-        return Err(format!(
-            "Interlock returned HTTP {}: {value}",
-            status.as_u16()
-        ));
-    }
     Ok(value)
+}
+
+/// Non-2xx bodies carry the server's explanation, and not always as JSON:
+/// axum answers malformed request bodies with a plain-text 422 ("Failed to
+/// deserialize the JSON body ..."). Prefer the JSON body when it parses, and
+/// fall back to truncated body text instead of reporting an invalid-JSON
+/// parse failure that hides the real cause.
+fn non_success_error(status: u16, body: &[u8]) -> String {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        return format!("Interlock returned HTTP {status}: {value}");
+    }
+    format!(
+        "Interlock returned HTTP {status}: {}",
+        error_body_text(body)
+    )
+}
+
+fn error_body_text(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim();
+    if text.is_empty() {
+        return "(empty body)".into();
+    }
+    let mut truncated: String = text.chars().take(MAX_ERROR_BODY_CHARS).collect();
+    if truncated.len() < text.len() {
+        truncated.push('…');
+    }
+    truncated
+}
+
+/// The server types handoff_write's request_id/session_id as strict UUIDs,
+/// while callers naturally pass harness identifiers ("sess-...", dates,
+/// hostnames), which the server rejects with a 422. Accept any string and
+/// deterministically map non-UUID strings to UUIDv5 in a fixed adapter
+/// namespace, so the same input always yields the same server-visible id —
+/// idempotent replay of handoff writes depends on that for request_id.
+fn normalize_handoff_ids(arguments: &mut Value) {
+    let Some(fields) = arguments.as_object_mut() else {
+        return;
+    };
+    for field in ["request_id", "session_id"] {
+        let derived = fields
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|id| Uuid::parse_str(id).is_err())
+            .map(|id| Uuid::new_v5(&adapter_id_namespace(), id.as_bytes()).to_string());
+        if let Some(uuid) = derived {
+            fields.insert(field.into(), json!(uuid));
+        }
+    }
+}
+
+/// Chained under a DNS name rather than NAMESPACE_OID so adapter-derived ids
+/// cannot collide with v5(OID, ...) ids minted by unrelated tooling.
+fn adapter_id_namespace() -> Uuid {
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"foreman-v6-mcp-adapter")
 }
 
 async fn call_tool(client: &Client, config: &Config, params: &Value) -> Result<Value, String> {
@@ -410,6 +466,9 @@ async fn call_tool(client: &Client, config: &Config, params: &Value) -> Result<V
         "handoff_close" => ("/v6.5/handoff/close", config.write_token.as_str()),
         _ => return Err(format!("unknown tool: {name}")),
     };
+    if name == "handoff_write" {
+        normalize_handoff_ids(&mut arguments);
+    }
     call_api(client, config, path, token, arguments).await
 }
 
@@ -566,5 +625,95 @@ mod tests {
                 "handoff_close"
             ]
         );
+    }
+
+    #[test]
+    fn non_success_error_prefers_json_body() {
+        let message = non_success_error(400, br#"{"error":"scope is required"}"#);
+        assert_eq!(
+            message,
+            r#"Interlock returned HTTP 400: {"error":"scope is required"}"#
+        );
+    }
+
+    #[test]
+    fn non_success_error_surfaces_plain_text_body() {
+        let body = b"Failed to deserialize the JSON body: request_id: UUID parsing failed: invalid character: expected an optional prefix of `h` or `H` at line 1 column 6";
+        let message = non_success_error(422, body);
+        assert!(message.starts_with("Interlock returned HTTP 422: "));
+        assert!(message.contains("UUID parsing failed"));
+        assert!(!message.contains("invalid JSON"));
+    }
+
+    #[test]
+    fn non_success_error_truncates_long_bodies() {
+        let body = vec![b'x'; 5_000];
+        let message = non_success_error(500, &body);
+        let text = message
+            .strip_prefix("Interlock returned HTTP 500: ")
+            .unwrap();
+        assert!(text.ends_with('…'));
+        assert!(text.chars().count() <= MAX_ERROR_BODY_CHARS + 1);
+    }
+
+    #[test]
+    fn non_success_error_marks_empty_body() {
+        assert_eq!(
+            non_success_error(503, b"  \n"),
+            "Interlock returned HTTP 503: (empty body)"
+        );
+    }
+
+    #[test]
+    fn handoff_ids_pass_uuids_through_untouched() {
+        let uuid = "550e8400-e29b-41d4-a716-446655440000";
+        let mut arguments = json!({"request_id": uuid, "session_id": uuid});
+        normalize_handoff_ids(&mut arguments);
+        assert_eq!(arguments["request_id"], json!(uuid));
+        assert_eq!(arguments["session_id"], json!(uuid));
+    }
+
+    #[test]
+    fn handoff_ids_derive_deterministically() {
+        let mut first =
+            json!({"request_id": "my-task-checkpoint-01", "session_id": "session-alpha-42"});
+        let mut second =
+            json!({"request_id": "my-task-checkpoint-01", "session_id": "session-alpha-42"});
+        normalize_handoff_ids(&mut first);
+        normalize_handoff_ids(&mut second);
+        assert_eq!(first["request_id"], second["request_id"]);
+        assert_eq!(first["session_id"], second["session_id"]);
+        for field in ["request_id", "session_id"] {
+            let derived = first[field].as_str().unwrap();
+            assert!(Uuid::parse_str(derived).is_ok());
+            assert_ne!(derived, "my-task-checkpoint-01");
+        }
+        assert_ne!(first["request_id"], first["session_id"]);
+    }
+
+    #[test]
+    fn handoff_id_derivation_leaves_other_fields_alone() {
+        let mut arguments =
+            json!({"request_id": "not-a-uuid", "thread_id": "also-not-a-uuid", "written_by": "agent-a"});
+        normalize_handoff_ids(&mut arguments);
+        assert_eq!(arguments["thread_id"], json!("also-not-a-uuid"));
+        assert_eq!(arguments["written_by"], json!("agent-a"));
+        assert!(Uuid::parse_str(arguments["request_id"].as_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn handoff_write_schema_documents_id_derivation() {
+        let schema = handoff_write_schema();
+        for field in ["request_id", "session_id"] {
+            let property = &schema["properties"][field];
+            assert!(
+                property["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("UUIDv5"),
+                "{field} description must mention UUIDv5 derivation"
+            );
+        }
+        assert!(schema["properties"]["request_id"].get("format").is_none());
     }
 }
